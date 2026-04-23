@@ -193,29 +193,39 @@ class ScraperEngine:
                         cols = r.find_all('td')
                         if len(cols) < 9: continue
                         
-                        row_author = normalize_text(cols[1].get_text())
-                        row_title = normalize_text(cols[2].get_text())
+                        # Libgen columns can be tricky; sometimes they merge or swap.
+                        # Let's be more robust by searching multiple columns for title/author data
+                        col_text = [normalize_text(c.get_text()) for c in cols[:4]]
+                        row_author = " ".join(col_text[1:2])
+                        row_title = " ".join(col_text[2:4]) # Usually title is 2, sometimes 3 is series/publisher
+                        
                         row_lang = cols[6].get_text().lower()
                         row_ext = cols[8].get_text().lower()
 
-                        # Strict Validation:
-                        # 1. Extension must be epub
-                        # 2. Language must be english
-                        # 3. Title must match
-                        # 4. At least one significant part of author name must be present
+                        # Extension & Language check
                         is_epub = 'epub' in row_ext
                         is_eng = any(l in row_lang for l in ['english', 'eng']) or not row_lang.strip()
+                        
+                        # Title check (Look in both Title and Series/Publisher column as Libgen is messy)
                         title_match = norm_title in row_title or row_title in norm_title
-                        author_match = any(p in row_author for p in author_parts) if author_parts else True
+                        # Fallback: check all first 4 columns for the title if not found
+                        if not title_match:
+                            title_match = any(norm_title in t for t in col_text)
+
+                        # Author check (Look in all first 4 columns as well)
+                        author_match = any(p in t for p in author_parts for t in col_text) if author_parts else True
 
                         if is_epub and is_eng and title_match and author_match:
                             ads = r.find('a', href=re.compile(r"ads\.php"))
                             if ads:
                                 direct = await self._resolve_mirror(urljoin("https://libgen.li", ads['href']), page)
-                                if direct: mirrors.append(("Libgen", direct))
-                                if len(mirrors) >= 2: break
+                                if direct: 
+                                    self.log(f"Found Libgen match: {row_title}")
+                                    mirrors.append(("Libgen", direct))
+                                    if len(mirrors) >= 2: break
                     if mirrors: break
-                except: pass
+                except Exception as e: 
+                    self.log(f"Libgen error: {e}")
 
                 # 2. Anna's
                 self.log(f"Searching Anna's for '{q}'...")
@@ -240,13 +250,16 @@ class ScraperEngine:
                             lg = msoup.find('a', href=re.compile(r"libgen\.li/ads\.php"))
                             if lg:
                                 direct = await self._resolve_mirror(lg['href'], page)
-                                if direct: mirrors.append(("Anna Libgen", direct))
+                                if direct: 
+                                    self.log(f"Found Anna match: {cand_text[:30]}...")
+                                    mirrors.append(("Anna Libgen", direct))
                             ipfs = msoup.find('a', href=re.compile(r"ipfs"))
                             if ipfs and 'ipfs://' in ipfs['href']:
                                 mirrors.append(("IPFS", f"https://ipfs.io/ipfs/{ipfs['href'].split('ipfs://')[1]}"))
                             if len(mirrors) >= 3: break
                     if mirrors: break
-                except: pass
+                except Exception as e:
+                    self.log(f"Anna error: {e}")
         finally: 
             await page.close()
         return mirrors

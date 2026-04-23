@@ -225,15 +225,19 @@ class ScraperEngine:
                 for row in rows:
                     cols = row.find_all('td')
                     if len(cols) >= 9:
-                        row_author = self.normalize_title(cols[1].get_text())
-                        row_title = self.normalize_title(cols[2].get_text())
+                        col_text = [self.normalize_title(c.get_text()) for c in cols[:4]]
+                        row_author = " ".join(col_text[1:2])
+                        row_title = " ".join(col_text[2:4])
                         row_lang = cols[6].get_text().lower()
                         row_ext = cols[8].get_text().lower()
 
                         is_epub = 'epub' in row_ext
                         is_eng = any(l in row_lang for l in ['english', 'eng']) or not row_lang.strip()
+                        
                         title_match = norm_title in row_title or row_title in norm_title
-                        author_match = any(p in row_author for p in author_parts) if author_parts else True
+                        if not title_match: title_match = any(norm_title in t for t in col_text)
+                        
+                        author_match = any(p in t for p in author_parts for t in col_text) if author_parts else True
 
                         if is_epub and is_eng and title_match and author_match:
                             for l in cols[1].find_all('a', href=True):
