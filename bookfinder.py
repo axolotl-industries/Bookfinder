@@ -143,17 +143,21 @@ class MetadataFetcher:
                 # 3. Subject Filter
                 subjects = [s.lower() for s in doc.get("subject", [])]
                 NON_WANTED = ["history", "criticism", "manual", "biography", "non-fiction", "nonfiction", "bibliography", "cookbook", "calendar", "comics", "graphic novels", "periodicals", "study guide"]
-                if subjects and any(term in s for term in NON_WANTED for s in subjects):
-                    continue
+                WANTED_GENRES = ["fiction", "short stories", "novel", "literature", "science fiction", "fantasy", "speculative fiction", "cyberpunk", "horror", "mystery", "thriller"]
+
+                if subjects:
+                    if any(term in s for term in NON_WANTED for s in subjects):
+                        if not any(term in s for term in WANTED_GENRES for s in subjects):
+                            continue
 
                 if series_filter:
                     s_norm = self.normalize_title(series_filter)
                     if s_norm not in self.normalize_title(title) and not any(s_norm in self.normalize_title(s) for s in subjects):
                         continue
 
-                # 4. Primary Work Verification (MUST be fiction or short stories if subjects exist)
+                # 4. Primary Work Verification
                 if subjects:
-                    is_fiction = any(term in s for term in ["fiction", "short stories", "novel", "literature"] for s in subjects)
+                    is_fiction = any(term in s for term in WANTED_GENRES for s in subjects)
                     if not is_fiction: continue
 
                 # 5. Normalization and Deduplication
