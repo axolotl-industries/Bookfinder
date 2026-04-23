@@ -92,9 +92,14 @@ class MetadataFetcher:
         return True
 
     def normalize_title(self, title: str) -> str:
+        if not title: return ""
         t = title.lower()
-        t = t.split(':')[0].split('(')[0] # Strip subtitles
-        t = re.sub(r'^the\s+', '', t)
+        # Strip subtitles and parentheses
+        t = t.split(':')[0].split('(')[0]
+        # Clean up common prefixes
+        t = re.sub(r'^the\s+|^a\s+|^an\s+', '', t)
+        # Clean up common cruft suffixes that interfere with deduplication
+        t = re.sub(r'\[\d+/\d+\]|\(part \d+\)', '', t)
         t = re.sub(r'[^\w\s]', '', t)
         return " ".join(t.split())
 
@@ -109,28 +114,54 @@ class MetadataFetcher:
             
             books = []
             seen_normalized = set()
-            OMNIBUS = [r"\bomnibus\b", r"\bcomplete works\b", r"\bcollected works\b", r"\bselections\b"]
+            CRUFT = [
+                r"\bbox set\b", r"\btrilogy\b", r"\bomnibus\b", r"\bselections\b",
+                r"\bsummary\b", r"\banalysis\b", r"\bstudy guide\b", r"\bcompanion\b",
+                r"\btrivia\b", r"\bunofficial\b", r"\bnotebook\b", r"\bdiary\b",
+                r"\bjournal\b", r"\bcalendar\b", r"\bcatalog\b", r"\bbin\b",
+                r"\bpack\b", r"\bx\d+\b", r"\bd/b\b", r"\bÚ10\b",
+                r"\bvol\.\s*\d+\b", r"\bvolume\s*\d+\b", r"\bissue\b", r"\bmagazine\b",
+                r"\breader\b", r"\bcollege\b", r"\bcourse\b", r"\btextbook\b",
+                r"\bcookbook\b", r"\bkitchen\b", r"\bcomic\b", r"\bgraphic novel\b",
+                r"\bmanga\b", r"\bedited by\b", r"\bvarious authors\b",
+                r"\[\d+/\d+\]", r"\(part \d+\)",
+                r"\bthe best (american|british|science|horror|mystery|sports)\b",
+                r" / ", r" & ", r" ; "
+            ]
 
             for doc in data.get("docs", []):
                 title = doc.get("title", "")
+                if not title: continue
                 
-                # Language Guard (OpenLibrary filter is good, but heuristic is safer)
+                # 1. Title Cruft Check
+                t_lower = title.lower()
+                if any(re.search(p, t_lower) for p in CRUFT): continue
+
+                # 2. Language Guard (OpenLibrary filter is good, but heuristic is safer)
                 if not self.is_probably_english(title): continue
                 
-                norm = self.normalize_title(title)
-                if title_filter and self.normalize_title(title_filter) not in norm: continue
-                
+                # 3. Subject Filter
                 subjects = [s.lower() for s in doc.get("subject", [])]
+                NON_WANTED = ["history", "criticism", "manual", "biography", "non-fiction", "nonfiction", "bibliography", "cookbook", "calendar", "comics", "graphic novels", "periodicals", "study guide"]
+                if subjects and any(term in s for term in NON_WANTED for s in subjects):
+                    continue
+
                 if series_filter:
                     s_norm = self.normalize_title(series_filter)
-                    if s_norm not in norm and not any(s_norm in self.normalize_title(s) for s in subjects):
+                    if s_norm not in self.normalize_title(title) and not any(s_norm in self.normalize_title(s) for s in subjects):
                         continue
 
-                is_fiction = any(s in ["fiction", "short stories", "novel"] or "fiction" in s for s in subjects)
-                if not is_fiction and "short stories" not in title.lower(): continue
-                if any(re.search(kw, title.lower()) for kw in OMNIBUS): continue
+                # 4. Primary Work Verification (MUST be fiction or short stories if subjects exist)
+                if subjects:
+                    is_fiction = any(term in s for term in ["fiction", "short stories", "novel", "literature"] for s in subjects)
+                    if not is_fiction: continue
 
-                if title and norm not in seen_normalized:
+                # 5. Normalization and Deduplication
+                norm = self.normalize_title(title)
+                if not norm: continue
+                if title_filter and self.normalize_title(title_filter) not in norm: continue
+
+                if norm not in seen_normalized:
                     books.append({
                         "title": title,
                         "isbns": [i for i in doc.get("isbn", []) if len(i) in [10, 13]],

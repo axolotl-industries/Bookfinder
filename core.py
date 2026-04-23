@@ -16,7 +16,12 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 def normalize_text(text: str) -> str:
     if not text: return ""
     t = text.lower()
+    # Strip subtitles and parentheses
+    t = t.split(':')[0].split('(')[0]
+    # Clean up common prefixes
     t = re.sub(r'^the\s+|^a\s+|^an\s+', '', t)
+    # Clean up common cruft suffixes that interfere with deduplication
+    t = re.sub(r'\[\d+/\d+\]|\(part \d+\)', '', t)
     t = re.sub(r'[^\w\s]', '', t)
     return " ".join(t.split())
 
@@ -56,7 +61,22 @@ class MetadataFetcher:
 
     def get_author_books(self, author_id: str, query: Optional[str] = None) -> List[Dict]:
         books, seen, page = [], set(), 1
-        CRUFT = [r"box set", r"trilogy", r"collection", r"omnibus", r"collected", r"summary", r"analysis", r"study guide", r"companion", r"trivia", r"unofficial", r"notebook", r" / ", r" & ", r" ; "]
+        # Robust filtering for omnibuses, anthologies, non-fiction, and non-primary works
+        CRUFT = [
+            r"\bbox set\b", r"\btrilogy\b", r"\bomnibus\b", r"\bselections\b",
+            r"\bsummary\b", r"\banalysis\b", r"\bstudy guide\b", r"\bcompanion\b",
+            r"\btrivia\b", r"\bunofficial\b", r"\bnotebook\b", r"\bdiary\b",
+            r"\bjournal\b", r"\bcalendar\b", r"\bcatalog\b", r"\bbin\b",
+            r"\bpack\b", r"\bx\d+\b", r"\bd/b\b", r"\bÚ10\b",
+            r"\bvol\.\s*\d+\b", r"\bvolume\s*\d+\b", r"\bissue\b", r"\bmagazine\b",
+            r"\breader\b", r"\bcollege\b", r"\bcourse\b", r"\btextbook\b",
+            r"\bcookbook\b", r"\bkitchen\b", r"\bcomic\b", r"\bgraphic novel\b",
+            r"\bmanga\b", r"\bedited by\b", r"\bvarious authors\b",
+            r"\[\d+/\d+\]", r"\(part \d+\)",
+            r"\bthe best (american|british|science|horror|mystery|sports)\b",
+            r" / ", r" & ", r" ; "
+        ]
+        
         while True:
             try:
                 resp = self.client.get("https://openlibrary.org/search.json", params={"author": author_id, "language": "eng", "fields": "title,isbn,first_publish_year,subject", "page": page})
@@ -64,11 +84,28 @@ class MetadataFetcher:
                 if not docs: break
                 for doc in docs:
                     title = doc.get("title", "")
-                    if not title or any(re.search(p, title.lower()) for p in CRUFT): continue
+                    if not title: continue
+                    
+                    # 1. Title Cruft Check
+                    t_lower = title.lower()
+                    if any(re.search(p, t_lower) for p in CRUFT): continue
+                    
+                    # 2. Subject Filter
                     subjects = [s.lower() for s in doc.get("subject", [])]
-                    if subjects and any(term in s for term in ["history", "criticism", "manual"] for s in subjects): continue
+                    NON_WANTED = ["history", "criticism", "manual", "biography", "non-fiction", "nonfiction", "bibliography", "cookbook", "calendar", "comics", "graphic novels", "periodicals", "study guide"]
+                    if subjects and any(term in s for term in NON_WANTED for s in subjects):
+                        continue
+                        
+                    # 3. Primary Work Verification (MUST be fiction or short stories if subjects exist)
+                    if subjects:
+                        is_fiction = any(term in s for term in ["fiction", "short stories", "novel", "literature"] for s in subjects)
+                        if not is_fiction: continue
+
+                    # 4. Normalization and Deduplication
                     norm = normalize_text(title)
+                    if not norm: continue
                     if query and normalize_text(query) not in norm: continue
+                    
                     if norm not in seen:
                         books.append({"title": title, "isbns": [i for i in doc.get("isbn", []) if len(i) in [10, 13]], "year": doc.get("first_publish_year")})
                         seen.add(norm)
