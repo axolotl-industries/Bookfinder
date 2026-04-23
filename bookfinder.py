@@ -261,8 +261,12 @@ class ScraperEngine:
 # --- Downloader Logic ---
 class Downloader:
     def __init__(self, base_dir: str = ".", max_size_mb: int = 25):
-        self.base_dir, self.max_size_bytes = base_dir, max_size_mb * 1024 * 1024
+        self.base_dir = os.path.abspath(base_dir)
+        self.max_size_bytes = max_size_mb * 1024 * 1024
         self.ssl_context = create_robust_ssl_context()
+        os.makedirs(self.base_dir, exist_ok=True)
+        try: os.chmod(self.base_dir, 0o777)
+        except: pass
 
     def is_valid_epub(self, file_path: str) -> bool:
         try:
@@ -270,14 +274,12 @@ class Downloader:
             with zipfile.ZipFile(file_path) as z: return 'mimetype' in z.namelist()
         except Exception: return False
 
-    def get_path(self, author: str, title: str) -> str:
-        author_dir = os.path.join(self.base_dir, re.sub(r'[\\/*?:"<>|]', "", author))
-        if not os.path.exists(author_dir): os.makedirs(author_dir)
+    def get_path(self, title: str) -> str:
         safe_title = re.sub(r'[\\/*?:"<>|]', '', title)
-        return os.path.join(author_dir, f"{safe_title}.epub")
+        return os.path.join(self.base_dir, f"{safe_title}.epub")
 
     async def download_from_mirror(self, mirror_name: str, url: str, author_name: str, book_data: Dict) -> bool:
-        file_path = self.get_path(author_name, book_data["title"])
+        file_path = self.get_path(book_data["title"])
         for ssl_config in [{"verify": self.ssl_context}, {"verify": False}, {"verify": True}]:
             try:
                 async with httpx.AsyncClient(follow_redirects=True, timeout=25.0, **ssl_config) as client:
@@ -296,12 +298,18 @@ class Downloader:
                                     downloaded_size += len(chunk)
                                     progress.update(task_id, advance=len(chunk))
                                     if downloaded_size > self.max_size_bytes: break
+                
+                try: os.chmod(file_path, 0o777)
+                except: pass
+
                 if self.is_valid_epub(file_path):
                     try:
                         meta = ebookmeta.get_metadata(file_path)
                         meta.title, meta.author_list_to_string = book_data["title"], author_name
                         if book_data.get("year"): meta.publish_year = str(book_data["year"])
                         ebookmeta.set_metadata(file_path, meta)
+                        try: os.chmod(file_path, 0o777)
+                        except: pass
                         console.print(f"[dim]  Tagged: {book_data['title']}[/dim]")
                     except Exception: pass
                     return True
@@ -332,7 +340,7 @@ async def run_search(author: str, t_q: Optional[str], s_q: Optional[str], dry_ru
 
         await scraper.start()
         for book in books:
-            path = downloader.get_path(formal_name, book["title"])
+            path = downloader.get_path(book["title"])
             if os.path.exists(path) and downloader.is_valid_epub(path):
                 console.print(f"[dim]Already exists: {book['title']}[/dim]")
                 results["downloaded"].append(book["title"]); continue

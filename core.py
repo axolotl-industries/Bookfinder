@@ -190,13 +190,18 @@ class ScraperEngine:
 
 class Downloader:
     def __init__(self, base_dir: str, log_func: Callable):
-        self.base_dir, self.log = os.path.abspath(base_dir), log_func
+        self.base_dir = os.path.abspath(base_dir)
+        self.log = log_func
         self.ssl_ctx = create_robust_ssl_context()
+        os.makedirs(self.base_dir, exist_ok=True)
+        # Ensure base directory itself is accessible
+        try: os.chmod(self.base_dir, 0o777)
+        except: pass
 
     async def download(self, mirror: str, url: str, author: str, title: str, book_data: Dict) -> bool:
-        safe_author, safe_title = re.sub(r'[\\/*?:"<>|]', "", author), re.sub(r'[\\/*?:"<>|]', "", title)
-        path = os.path.join(self.base_dir, safe_author, f"{safe_title}.epub")
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # Save directly to base_dir, no author subfolders
+        safe_title = re.sub(r'[\\/*?:"<>|]', "", title)
+        path = os.path.join(self.base_dir, f"{safe_title}.epub")
 
         for cfg in [{"verify": self.ssl_ctx}, {"verify": False}]:
             try:
@@ -211,16 +216,24 @@ class Downloader:
                             async for chunk in resp.aiter_bytes(): f.write(chunk)
                             f.flush(); os.fsync(f.fileno())
                 
-                with zipfile.ZipFile(path) as z:
-                    if 'mimetype' in z.namelist():
-                        try:
-                            meta = ebookmeta.get_metadata(path)
-                            meta.title, meta.author_list_to_string = title, author
-                            ebookmeta.set_metadata(path, meta)
-                        except: pass
-                        self.log(f"Saved to: {path}")
-                        return True
-                os.remove(path)
+                # Set permissions to 777 immediately after download
+                try: os.chmod(path, 0o777)
+                except: pass
+
+                if zipfile.is_zipfile(path):
+                    with zipfile.ZipFile(path) as z:
+                        if 'mimetype' in z.namelist():
+                            try:
+                                meta = ebookmeta.get_metadata(path)
+                                meta.title, meta.author_list_to_string = title, author
+                                ebookmeta.set_metadata(path, meta)
+                                # Re-apply 777 after metadata tagging (some libs might recreate the file)
+                                try: os.chmod(path, 0o777)
+                                except: pass
+                            except: pass
+                            self.log(f"Saved to: {path}")
+                            return True
+                if os.path.exists(path): os.remove(path)
             except:
                 if os.path.exists(path): os.remove(path)
         return False
