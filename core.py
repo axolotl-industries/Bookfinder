@@ -137,9 +137,14 @@ class ScraperEngine:
         mirrors = []
         page = await self.browser.new_page()
         
-        clean_title = re.sub(r'^the\s+|^a\s+|^an\s+', '', title.lower())
+        norm_title = normalize_text(title)
+        # Use first two words of author for matching to be robust against "Stephen King" vs "King, Stephen"
+        author_parts = [p for p in normalize_text(author).split() if len(p) > 2]
+        
         queries = []
         if isbns: queries.append(isbns[0])
+        # Search query: Author + Title (title stripped of leading articles)
+        clean_title = re.sub(r'^the\s+|^a\s+|^an\s+', '', title.lower())
         queries.append(f"{author} {clean_title}")
 
         try:
@@ -150,31 +155,62 @@ class ScraperEngine:
                     await page.goto(f"https://libgen.li/index.php?req={quote(q)}&res=25&filesuns=all", timeout=30000)
                     soup = BeautifulSoup(await page.content(), 'html.parser')
                     for r in soup.find_all('tr')[1:]:
-                        if 'epub' in r.get_text().lower() and normalize_text(title) in normalize_text(r.get_text()):
+                        cols = r.find_all('td')
+                        if len(cols) < 9: continue
+                        
+                        row_author = normalize_text(cols[1].get_text())
+                        row_title = normalize_text(cols[2].get_text())
+                        row_lang = cols[6].get_text().lower()
+                        row_ext = cols[8].get_text().lower()
+
+                        # Strict Validation:
+                        # 1. Extension must be epub
+                        # 2. Language must be english
+                        # 3. Title must match
+                        # 4. At least one significant part of author name must be present
+                        is_epub = 'epub' in row_ext
+                        is_eng = any(l in row_lang for l in ['english', 'eng']) or not row_lang.strip()
+                        title_match = norm_title in row_title or row_title in norm_title
+                        author_match = any(p in row_author for p in author_parts) if author_parts else True
+
+                        if is_epub and is_eng and title_match and author_match:
                             ads = r.find('a', href=re.compile(r"ads\.php"))
                             if ads:
                                 direct = await self._resolve_mirror(urljoin("https://libgen.li", ads['href']), page)
                                 if direct: mirrors.append(("Libgen", direct))
+                                if len(mirrors) >= 2: break
+                    if mirrors: break
                 except: pass
 
                 # 2. Anna's
                 self.log(f"Searching Anna's for '{q}'...")
                 try:
                     await page.goto(f"{self.annas_base}/search?q={quote(q)}&ext=epub&lang=en", timeout=30000)
+                    # Anna's results often have the title/author in the link text or nearby div
                     results = BeautifulSoup(await page.content(), 'html.parser').select('a[href*="/md5/"]')
-                    for cand in results[:2]:
-                        if q != (isbns[0] if isbns else ""):
-                            if normalize_text(title) not in normalize_text(cand.get_text()): continue
+                    for cand in results[:3]:
+                        cand_text = normalize_text(cand.get_text())
                         
-                        await page.goto(urljoin(self.annas_base, cand['href']), timeout=30000)
-                        msoup = BeautifulSoup(await page.content(), 'html.parser')
-                        lg = msoup.find('a', href=re.compile(r"libgen\.li/ads\.php"))
-                        if lg:
-                            direct = await self._resolve_mirror(lg['href'], page)
-                            if direct: mirrors.append(("Anna Libgen", direct))
-                        ipfs = msoup.find('a', href=re.compile(r"ipfs"))
-                        if ipfs and 'ipfs://' in ipfs['href']:
-                            mirrors.append(("IPFS", f"https://ipfs.io/ipfs/{ipfs['href'].split('ipfs://')[1]}"))
+                        # For ISBN searches, we trust the result more, otherwise check title/author
+                        if q == (isbns[0] if isbns else None):
+                            match = True
+                        else:
+                            title_match = norm_title in cand_text or cand_text in norm_title
+                            author_match = any(p in cand_text for p in author_parts) if author_parts else True
+                            match = title_match and author_match
+
+                        if match:
+                            await page.goto(urljoin(self.annas_base, cand['href']), timeout=30000)
+                            msoup = BeautifulSoup(await page.content(), 'html.parser')
+                            lg = msoup.find('a', href=re.compile(r"libgen\.li/ads\.php"))
+                            if lg:
+                                direct = await self._resolve_mirror(lg['href'], page)
+                                if direct: mirrors.append(("Anna Libgen", direct))
+                            ipfs = msoup.find('a', href=re.compile(r"ipfs"))
+                            if ipfs and 'ipfs://' in ipfs['href']:
+                                mirrors.append(("IPFS", f"https://ipfs.io/ipfs/{ipfs['href'].split('ipfs://')[1]}"))
+                            if len(mirrors) >= 3: break
+                    if mirrors: break
                 except: pass
         finally: 
             await page.close()

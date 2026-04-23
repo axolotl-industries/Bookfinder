@@ -206,29 +206,36 @@ class ScraperEngine:
         return None
 
     async def get_mirrors(self, author: str, title: str, isbns: List[str]) -> Generator[Tuple[str, str], None, None]:
+        # Helper for matching
+        norm_title = self.normalize_title(title)
+        author_parts = [p for p in self.normalize_title(author).split() if len(p) > 2]
+
         # 1. Libgen Direct (FAST + Strict English)
         search_title = title.replace("The ", "") if title.startswith("The ") else title
         query = f"{author} {search_title}"
         console.print(f"[dim]  Searching Libgen.li for '{query}'...[/dim]")
         try:
-            # We explicitly filter for language 'English' in Libgen params if possible, 
-            # but usually 'filesuns=all' combined with 'epub' and 't/a' search is best.
             resp = await self.client.get(f"{LIBGEN_BASE_URL}/index.php", params={"req": query, "res": 25, "filesuns": "all"})
             if resp.status_code == 200:
                 rows = BeautifulSoup(resp.text, 'html.parser').find_all('tr')[1:]
-                epub_links = []
                 for row in rows:
                     cols = row.find_all('td')
                     if len(cols) >= 9:
-                        ext = cols[8].get_text(strip=True).lower()
-                        lang = cols[6].get_text(strip=True).lower()
-                        # Strict Mirror Filter: Must be English and EPUB
-                        if 'epub' in ext and ('english' in lang or 'eng' in lang or not lang):
+                        row_author = self.normalize_title(cols[1].get_text())
+                        row_title = self.normalize_title(cols[2].get_text())
+                        row_lang = cols[6].get_text().lower()
+                        row_ext = cols[8].get_text().lower()
+
+                        is_epub = 'epub' in row_ext
+                        is_eng = any(l in row_lang for l in ['english', 'eng']) or not row_lang.strip()
+                        title_match = norm_title in row_title or row_title in norm_title
+                        author_match = any(p in row_author for p in author_parts) if author_parts else True
+
+                        if is_epub and is_eng and title_match and author_match:
                             for l in cols[1].find_all('a', href=True):
-                                if 'ads.php' in l['href']: epub_links.append(urljoin(LIBGEN_BASE_URL, l['href']))
-                for ads_url in epub_links[:3]:
-                    direct = await self._resolve_libgen_ads(ads_url)
-                    if direct: yield "Libgen Direct", direct
+                                if 'ads.php' in l['href']:
+                                    direct = await self._resolve_libgen_ads(urljoin(LIBGEN_BASE_URL, l['href']))
+                                    if direct: yield "Libgen Direct", direct
         except Exception: pass
 
         # 2. Anna's Archive (Browser Fallback + Strict English)
@@ -238,23 +245,32 @@ class ScraperEngine:
         try:
             for q in queries[:2]:
                 console.print(f"[dim]  Searching Anna's Archive for '{q}'...[/dim]")
-                # Explicit lang=en filter
                 await page.goto(f"{self.annas_base}/search?q={quote(q)}&ext=epub&lang=en", timeout=25000)
                 await asyncio.sleep(2)
                 results = BeautifulSoup(await page.content(), 'html.parser').find_all('a', class_='js-vim-focus') or []
-                for cand in results[:2]:
-                    await page.goto(urljoin(self.annas_base, cand['href']), timeout=25000)
-                    await asyncio.sleep(2)
-                    md5_soup = BeautifulSoup(await page.content(), 'html.parser')
-                    libgen = md5_soup.find('a', href=re.compile(r"libgen\.li/ads\.php", re.I))
-                    if libgen:
-                        direct = await self._resolve_libgen_ads(libgen['href'])
-                        if direct: yield "Anna Libgen", direct
-                    ipfs = md5_soup.find('a', href=re.compile(r"ipfs", re.I))
-                    if ipfs:
-                        h = ipfs['href']
-                        if h.startswith('ipfs://'): yield "IPFS", f"https://ipfs.io/ipfs/{h.replace('ipfs://', '')}"
-                        elif h.startswith('http'): yield "External IPFS", h
+                for cand in results[:3]:
+                    cand_text = self.normalize_title(cand.get_text())
+                    
+                    if q == (isbns[0] if isbns else None):
+                        match = True
+                    else:
+                        title_match = norm_title in cand_text or cand_text in norm_title
+                        author_match = any(p in cand_text for p in author_parts) if author_parts else True
+                        match = title_match and author_match
+
+                    if match:
+                        await page.goto(urljoin(self.annas_base, cand['href']), timeout=25000)
+                        await asyncio.sleep(2)
+                        md5_soup = BeautifulSoup(await page.content(), 'html.parser')
+                        libgen = md5_soup.find('a', href=re.compile(r"libgen\.li/ads\.php", re.I))
+                        if libgen:
+                            direct = await self._resolve_libgen_ads(libgen['href'])
+                            if direct: yield "Anna Libgen", direct
+                        ipfs = md5_soup.find('a', href=re.compile(r"ipfs", re.I))
+                        if ipfs:
+                            h = ipfs['href']
+                            if h.startswith('ipfs://'): yield "IPFS", f"https://ipfs.io/ipfs/{h.replace('ipfs://', '')}"
+                            elif h.startswith('http'): yield "External IPFS", h
         except Exception: pass
         finally: await page.close()
 
