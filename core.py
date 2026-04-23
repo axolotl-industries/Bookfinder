@@ -47,17 +47,45 @@ class MetadataFetcher:
     def __init__(self):
         self.client = httpx.Client(timeout=20.0, verify=False, headers={"User-Agent": UA})
 
-    def search_author(self, name: str) -> Optional[Tuple[str, str]]:
+    def search_author(self, name: str) -> List[Dict]:
         try:
             clean_name = name.replace(".", " ").strip().lower()
             response = self.client.get(f"https://openlibrary.org/search/authors.json", params={"q": clean_name})
             docs = response.json().get("docs", [])
-            if not docs: return None
-            for doc in docs[:10]:
-                if doc.get("name", "").lower() == clean_name: return doc["key"], doc.get("name")
-            best = sorted(docs[:5], key=lambda x: x.get("work_count", 0), reverse=True)[0]
-            return best["key"], best.get("name")
-        except: return None
+            if not docs: return []
+            
+            # Take top 5 likely matches
+            candidates = sorted(docs[:10], key=lambda x: x.get("work_count", 0), reverse=True)[:5]
+            detailed_results = []
+            
+            for doc in candidates:
+                key = doc["key"]
+                author_data = {
+                    "id": key,
+                    "name": doc.get("name"),
+                    "top_work": doc.get("top_work"),
+                    "work_count": doc.get("work_count"),
+                    "birth_date": doc.get("birth_date"),
+                    "bio": "",
+                    "photo_url": ""
+                }
+                
+                # Fetch detailed bio and photo info
+                try:
+                    resp = self.client.get(f"https://openlibrary.org/authors/{key}.json")
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        # Bio can be a string or a dict with a 'value' key
+                        bio = data.get("bio", "")
+                        author_data["bio"] = bio.get("value", bio) if isinstance(bio, dict) else bio
+                        
+                        if data.get("photos"):
+                            author_data["photo_url"] = f"https://covers.openlibrary.org/a/id/{data['photos'][0]}-M.jpg"
+                except: pass
+                
+                detailed_results.append(author_data)
+            return detailed_results
+        except: return []
 
     def get_author_books(self, author_id: str, query: Optional[str] = None) -> List[Dict]:
         books, seen, page = [], set(), 1

@@ -32,10 +32,17 @@ async def index(u: str = Depends(authenticate)):
 @app.get("/search")
 async def search(author: str, query: str = None, u: str = Depends(authenticate)):
     fetcher = MetadataFetcher()
-    info = fetcher.search_author(author)
-    if not info: return {"error": "Author not found"}
-    books = fetcher.get_author_books(info[0], query)
-    return {"author": info[1], "books": books}
+    authors = fetcher.search_author(author)
+    if not authors: return {"error": "Author not found"}
+    # If there's an exact match with high work count, or just one result, we could auto-select,
+    # but based on user request, let's return the list for disambiguation.
+    return {"authors": authors}
+
+@app.get("/author_books")
+async def author_books(author_id: str, author_name: str, query: str = None, u: str = Depends(authenticate)):
+    fetcher = MetadataFetcher()
+    books = fetcher.get_author_books(author_id, query)
+    return {"author": author_name, "books": books}
 
 @app.post("/start_job")
 async def start_job(data: dict = Body(...), u: str = Depends(authenticate)):
