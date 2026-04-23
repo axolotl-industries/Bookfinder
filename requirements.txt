@@ -1,0 +1,9 @@
+typer[all]
+rich
+httpx
+playwright
+beautifulsoup4
+requests
+ebookmeta
+fastapi
+uvicorn

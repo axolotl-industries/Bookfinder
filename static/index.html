@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Bookfinder</title>
+    <style>
+        :root {
+            --primary: #0071e3;
+            --primary-hover: #0077ed;
+            --bg: #f5f5f7;
+            --card-bg: #ffffff;
+            --text: #1d1d1f;
+            --log-bg: #1d1d1f;
+            --log-text: #ffffff;
+        }
+        body { font-family: -apple-system, system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 15px; background: var(--bg); color: var(--text); }
+        .card { background: var(--card-bg); padding: 20px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); margin-bottom: 20px; }
+        .search-group { display: flex; flex-direction: column; gap: 12px; }
+        @media (min-width: 600px) { .search-group { flex-direction: row; align-items: center; } h1 { text-align: left; } }
+        input { padding: 14px; border: 1px solid #d2d2d7; border-radius: 10px; font-size: 16px; width: 100%; box-sizing: border-box; }
+        button { padding: 14px 24px; background: var(--primary); color: white; border: none; border-radius: 10px; cursor: pointer; font-weight: 600; font-size: 16px; width: 100%; }
+        button:disabled { background: #d2d2d7; cursor: not-allowed; }
+        .table-container { width: 100%; overflow-x: auto; margin-top: 10px; }
+        table { width: 100%; border-collapse: collapse; min-width: 400px; }
+        th, td { text-align: left; padding: 14px 8px; border-bottom: 1px solid #f2f2f2; }
+        .chk-col { width: 50px; text-align: center; }
+        #log { background: var(--log-bg); color: var(--log-text); padding: 15px; border-radius: 10px; height: 400px; overflow-y: auto; font-family: monospace; white-space: pre-wrap; font-size: 13px; }
+        .spinner { display: inline-block; width: 20px; height: 20px; border: 3px solid rgba(255,255,255,.3); border-radius: 50%; border-top-color: #fff; animation: spin 1s ease-in-out infinite; margin-right: 10px; vertical-align: middle; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .settings-link { text-align: right; margin-bottom: 10px; }
+        .settings-link a { color: var(--primary); text-decoration: none; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <h1>📚 Bookfinder</h1>
+    <div class="settings-link"><a href="#" onclick="toggleSettings()">⚙️ Prowlarr Settings</a></div>
+    
+    <div id="settings-card" class="card" style="display:none;">
+        <h3>Prowlarr Config</h3>
+        <input type="text" id="p_url" placeholder="URL (http://ip:9696)" style="margin-bottom:10px;">
+        <input type="password" id="p_key" placeholder="API Key" style="margin-bottom:10px;">
+        <button onclick="saveSettings()" style="background:#34c759;">Save</button>
+    </div>
+
+    <div class="card">
+        <div class="search-group">
+            <input type="text" id="author" placeholder="Author Name">
+            <button id="search-btn" onclick="search()">Search</button>
+        </div>
+        <input type="text" id="query" placeholder="Filter Title (Optional)" style="margin-top:12px;">
+    </div>
+
+    <div id="results-card" class="card" style="display:none;">
+        <h3 id="author-title"></h3>
+        <div class="table-container"><div id="results-list"></div></div>
+        <button id="download-btn" onclick="startDownload()" style="margin-top:20px;">Download Selected</button>
+    </div>
+
+    <div id="log-card" class="card" style="display:none;">
+        <h3>Log</h3>
+        <div id="log"></div>
+    </div>
+
+    <script>
+        let currentBooks = [], currentAuthor = "", logIndex = 0;
+        document.getElementById('p_url').value = localStorage.getItem('p_url') || '';
+        document.getElementById('p_key').value = localStorage.getItem('p_key') || '';
+
+        function toggleSettings() { const c = document.getElementById('settings-card'); c.style.display = c.style.display==='none'?'block':'none'; }
+        function saveSettings() { localStorage.setItem('p_url', document.getElementById('p_url').value); localStorage.setItem('p_key', document.getElementById('p_key').value); toggleSettings(); }
+
+        async function search() {
+            const a = document.getElementById('author').value; if(!a) return;
+            const btn = document.getElementById('search-btn');
+            btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Searching...';
+            
+            try {
+                const res = await fetch(`/search?author=${encodeURIComponent(a)}&query=${encodeURIComponent(document.getElementById('query').value)}`);
+                const data = await res.json();
+                if(data.error) return alert(data.error);
+                currentAuthor = data.author; currentBooks = data.books;
+                document.getElementById('author-title').innerText = `${data.books.length} books for ${data.author}`;
+                document.getElementById('results-card').style.display = 'block';
+                let h = `<table><tr><th class="chk-col"><input type="checkbox" checked onclick="toggleAll(this)"></th><th>Year</th><th>Title</th></tr>`;
+                data.books.forEach((b,i) => h+=`<tr><td class="chk-col"><input type="checkbox" class="book-chk" data-i="${i}" checked></td><td>${b.year||'-'}</td><td>${b.title}</td></tr>`);
+                document.getElementById('results-list').innerHTML = h+'</table>';
+            } finally { btn.disabled = false; btn.innerText = 'Search'; }
+        }
+
+        function toggleAll(m) { document.querySelectorAll('.book-chk').forEach(c => c.checked = m.checked); }
+
+        async function startDownload() {
+            const idxs = Array.from(document.querySelectorAll('.book-chk:checked')).map(c => parseInt(c.dataset.i));
+            if(!idxs.length) return alert("Select books first.");
+            document.getElementById('log-card').style.display = 'block';
+            document.getElementById('download-btn').disabled = true;
+            document.getElementById('log').innerHTML = "Initializing job...\n";
+            logIndex = 0;
+
+            const res = await fetch('/start_job', { method: 'POST', headers: {'Content-Type':'application/json'}, 
+                body: JSON.stringify({author: currentAuthor, books: idxs.map(i => currentBooks[i]), prowlarr_url: localStorage.getItem('p_url'), prowlarr_key: localStorage.getItem('p_key')})
+            });
+            const { job_id } = await res.json();
+            connect(job_id);
+        }
+
+        function connect(job_id) {
+            const ev = new EventSource(`/stream/${job_id}?last_idx=${logIndex}`);
+            const logDiv = document.getElementById('log');
+            ev.onmessage = (e) => {
+                const line = document.createElement('div');
+                const msg = e.data; line.textContent = msg;
+                if(msg.startsWith("SUCCESS:")) line.style.color = "#34c759";
+                if(msg.startsWith("FAILED:")) line.style.color = "#ff453a";
+                if(msg.startsWith("PROCESSING:")) { line.style.color = "#0a84ff"; line.style.marginTop = "10px"; line.style.fontWeight = "bold"; }
+                logDiv.appendChild(line); logDiv.scrollTop = logDiv.scrollHeight;
+                logIndex++;
+                if(msg === "JOB_COMPLETE") { ev.close(); document.getElementById('download-btn').disabled = false; }
+            };
+            ev.onerror = () => { ev.close(); setTimeout(() => connect(job_id), 2000); };
+        }
+    </script>
+</body>
+</html>
