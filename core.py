@@ -760,7 +760,7 @@ class ScraperEngine:
     async def start(self):
         self.annas_base = await resolve_annas_domain(self.log)
         self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.launch(headless=True)
+        self.browser = await self.playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"])
 
     async def stop(self):
         try:
