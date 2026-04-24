@@ -84,19 +84,34 @@ class NewznabScraper:
                         items = data.get("channel", {}).get("item", [])
                 except Exception:
                     # Fallback to XML parsing if JSON fails
-                    self.log("Usenet returned non-JSON, attempting XML parse...")
-                    soup = BeautifulSoup(resp.text, 'html.parser')
-                    for item in soup.find_all('item'):
-                        title_tag = item.find('title')
-                        link_tag = item.find('link')
-                        enclosure_tag = item.find('enclosure')
+                    self.log("Usenet returned non-JSON, attempting robust XML parse...")
+                    try:
+                        # 1. Try BeautifulSoup with multiple strategies
+                        soup = BeautifulSoup(resp.text, 'html.parser')
+                        xml_items = soup.find_all('item')
                         
-                        items.append({
-                            "title": title_tag.get_text() if title_tag else "",
-                            "link": link_tag.get_text() if link_tag else "",
-                            "enclosure": {"@url": enclosure_tag['url']} if (enclosure_tag and enclosure_tag.has_attr('url')) else None
-                        })
-                    self.log(f"XML parse found {len(items)} items")
+                        if not xml_items:
+                            # 2. Try regex fallback if parser fails (often happens with namespaced XML)
+                            titles = re.findall(r'<title>(.*?)</title>', resp.text)
+                            links = re.findall(r'<link>(.*?)</link>', resp.text)
+                            # Zip them together, skipping the first (channel) title
+                            if len(titles) > 1:
+                                for t, l in zip(titles[1:], links[1:]):
+                                    items.append({"title": t, "link": l})
+                        else:
+                            for item in xml_items:
+                                title_tag = item.find('title')
+                                link_tag = item.find('link')
+                                enclosure_tag = item.find('enclosure')
+                                items.append({
+                                    "title": title_tag.get_text() if title_tag else "",
+                                    "link": link_tag.get_text() if link_tag else "",
+                                    "enclosure": {"@url": enclosure_tag['url']} if (enclosure_tag and enclosure_tag.has_attr('url')) else None
+                                })
+                    except Exception as parse_err:
+                        self.log(f"XML parse failed: {parse_err}")
+                    
+                    self.log(f"Usenet parse found {len(items)} items")
                 
                 if not isinstance(items, list): items = [items] if items else []
 
@@ -409,14 +424,14 @@ class ScraperEngine:
         finally: 
             await page.close()
         return mirrors
-
-    async def _resolve_mirror(self, url: str, page: Browser) -> Optional[str]:
-        try:
-            await page.goto(url, timeout=15000)
-            link = BeautifulSoup(await page.content(), 'html.parser').find('a', href=re.compile(r"get\.php|/get/|download", re.I))
-            if link: return urljoin(url, link['href'])
-        except: pass
-        return None
+async def _resolve_mirror(self, url: str, page: Browser) -> Optional[str]:
+    try:
+        await page.goto(url, timeout=15000)
+        link = BeautifulSoup(await page.content(), 'html.parser').find('a', href=re.compile(r"get\.php|/get/|download", re.I))
+        if link: return urljoin(url, link['href'])
+    except asyncio.CancelledError: raise
+    except Exception: pass
+    return None
 
 class Downloader:
     def __init__(self, base_dir: str, log_func: Callable):
