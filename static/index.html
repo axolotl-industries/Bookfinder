@@ -122,11 +122,11 @@
         });
 
         function toggleSettings() { const c = document.getElementById('settings-card'); c.style.display = c.style.display==='none'?'block':'none'; }
-        function saveSettings() { 
+        function saveSettings() {
             ['usenet_url', 'usenet_key', 'sab_url', 'sab_key'].forEach(k => {
                 localStorage.setItem(k, document.getElementById(k).value);
             });
-            toggleSettings(); 
+            toggleSettings();
         }
 
         async function search() {

@@ -63,7 +63,7 @@ async def stop_job(job_id: str, u: str = Depends(authenticate)):
 
 async def run_background_download(job_id, data):
     def log(m): JOBS.add_log(job_id, m)
-    
+
     usenet = NewznabScraper(data.get('usenet_url'), data.get('usenet_key'), log)
     sab = SabnzbdClient(data.get('sab_url'), data.get('sab_key'), log)
     scraper = ScraperEngine(log)

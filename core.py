@@ -48,6 +48,17 @@ async def resolve_annas_domain(log_func: Callable) -> str:
         except: continue
     return "https://annas-archive.gl"
 
+def redact_url(url: str) -> str:
+    """Strip secrets from a URL before logging. Handles both raw and percent-encoded forms."""
+    # apikey=... and its percent-encoded variant apikey%3D...
+    url = re.sub(r'(apikey)(=|%3D)[^&%]+', r'\1\2***', url, flags=re.I)
+    # Cloudflare Access wraps the original URL inside redirect_url= and a base64 JWT in meta=.
+    # Both can leak the apikey, so blank them entirely.
+    url = re.sub(r'(redirect_url)(=|%3D)[^&]+', r'\1\2***', url, flags=re.I)
+    url = re.sub(r'(\?|&)meta=[^&]+', r'\1meta=***', url, flags=re.I)
+    return url
+
+
 class NewznabScraper:
     def __init__(self, api_url: str, api_key: str, log_func: Callable):
         # Normalise to the indexer root. Strip query string, trailing slashes, and a trailing /api.
@@ -85,16 +96,11 @@ class NewznabScraper:
                 resp = await client.get(url, params=params)
 
                 ctype = resp.headers.get("Content-Type", "").lower()
-                sent_url = str(resp.request.url)
-                # Redact apikey in logged URLs so it doesn't leak into shared logs.
-                safe_sent = re.sub(r'(apikey=)[^&]+', r'\1***', sent_url)
-                safe_final = re.sub(r'(apikey=)[^&]+', r'\1***', str(resp.url))
-
-                self.log(f"Usenet request: {safe_sent}")
+                self.log(f"Usenet request: {redact_url(str(resp.request.url))}")
                 if resp.history:
-                    self.log(f"Followed {len(resp.history)} redirect(s); final URL: {safe_final}")
+                    self.log(f"Followed {len(resp.history)} redirect(s); final URL: {redact_url(str(resp.url))}")
                     for h in resp.history:
-                        self.log(f"  {h.status_code} -> {h.headers.get('location', '?')}")
+                        self.log(f"  {h.status_code} -> {redact_url(h.headers.get('location', '?'))}")
                 self.log(f"Usenet response: status={resp.status_code} content-type='{ctype}' bytes={len(resp.content)}")
 
                 if resp.status_code != 200:
@@ -108,13 +114,13 @@ class NewznabScraper:
 
                 if looks_html:
                     self.log("ERROR: Prowlarr returned HTML instead of an RSS/XML or JSON feed.")
-                    self.log("  Likely causes, in order of likelihood:")
-                    self.log("   1. A reverse proxy / auth gateway in front of Prowlarr is intercepting the request.")
-                    self.log("      If Prowlarr sits behind e.g. Authelia / nginx basic-auth, this container has no session cookie.")
-                    self.log("   2. The Newznab URL is wrong. It should point to the indexer root, not the Prowlarr UI.")
-                    self.log("      Correct form: http://<host>:9696/<indexer-id>  (the /api suffix is appended automatically)")
-                    self.log("   3. Prowlarr's 'Authentication Required' is set to 'Enabled' and the apikey is being rejected.")
-                    self.log(f"  Body (first 500 chars): {body[:500]}")
+                    self.log("  Most common cause: an auth gateway in front of Prowlarr (Cloudflare Access,")
+                    self.log("  Authelia, nginx basic-auth, etc.) is intercepting the request. Your browser")
+                    self.log("  works because it holds a session cookie; this container does not.")
+                    self.log("  Fix: point the URL at Prowlarr directly on the LAN / docker network instead of")
+                    self.log("  the public gateway hostname. Also double-check the URL shape is")
+                    self.log("  http://<host>:<port>/<indexer-id> and the apikey is correct.")
+                    self.log(f"  Body (first 200 chars): {body[:200]}")
                     return []
 
                 items = self._parse(body, ctype)
@@ -245,7 +251,7 @@ class SabnzbdClient:
                 slots = q_data.get("queue", {}).get("slots", [])
                 for s in slots:
                     if s.get("nzo_id") == nzo_id: return "downloading"
-                
+
                 # 2. Check History
                 resp = await client.get(f"{self.url}/api", params={"mode": "history", "nzo_id": nzo_id, "apikey": self.api_key, "output": "json"})
                 h_data = resp.json()
