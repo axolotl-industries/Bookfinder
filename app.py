@@ -54,6 +54,7 @@ class JobStore:
         self.tasks = {}
 
     def add_log(self, job_id, msg):
+        print(f"[DEBUG] add_log job={job_id} msg={msg}")
         if job_id not in self.jobs:
             self.jobs[job_id] = {'logs': [], 'status': 'running', 'created': time.time()}
         self.jobs[job_id]['logs'].append(msg)
@@ -100,7 +101,7 @@ async def index(request: Request):
     if not request.session.get("user"):
         return RedirectResponse("/login", status_code=303)
     with open("static/index.html") as f:
-        return f.read()
+        return HTMLResponse(f.read(), headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"})
 
 
 @app.get("/whoami")
@@ -133,7 +134,8 @@ async def author_books(author_id: str, author_name: str, query: str = None, u: s
 @app.post("/start_job")
 async def start_job(data: dict = Body(...), u: str = Depends(current_user)):
     job_id = str(uuid.uuid4())
-    JOBS.jobs[job_id] = {'logs': [], 'status': 'running', 'created': time.time()}
+    print(f"[bookfinder] Starting job {job_id} for {data.get('author')}")
+    JOBS.jobs[job_id] = {'logs': ["Initializing job..."], 'status': 'running', 'created': time.time()}
     task = asyncio.create_task(run_background_download(job_id, data))
     JOBS.tasks[job_id] = task
     return {"job_id": job_id}
@@ -163,6 +165,7 @@ def _library_epubs() -> set:
 async def run_background_download(job_id, data):
     def log(m): JOBS.add_log(job_id, m)
 
+    print(f"[bookfinder] Background task started for {job_id}")
     log("Starting background job...")
     try:
         log("Initializing service clients...")
@@ -243,6 +246,7 @@ async def stream(request: Request, job_id: str, last_idx: int = 0):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     async def generator():
+        print(f"[bookfinder] Stream generator started for {job_id}")
         idx = last_idx
         while True:
             job = JOBS.jobs.get(job_id)
