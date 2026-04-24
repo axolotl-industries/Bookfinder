@@ -194,10 +194,10 @@ class ScraperEngine:
                         if len(cols) < 9: continue
                         
                         # Libgen columns can be tricky; sometimes they merge or swap.
-                        # Let's be more robust by searching multiple columns for title/author data
+                        # Let's be more robust but careful about empty strings.
                         col_text = [normalize_text(c.get_text()) for c in cols[:4]]
-                        row_author = " ".join(col_text[1:2])
-                        row_title = " ".join(col_text[2:4]) # Usually title is 2, sometimes 3 is series/publisher
+                        row_author = col_text[1] if len(col_text) > 1 else ""
+                        row_title = col_text[2] if len(col_text) > 2 else ""
                         
                         row_lang = cols[6].get_text().lower()
                         row_ext = cols[8].get_text().lower()
@@ -206,14 +206,28 @@ class ScraperEngine:
                         is_epub = 'epub' in row_ext
                         is_eng = any(l in row_lang for l in ['english', 'eng']) or not row_lang.strip()
                         
-                        # Title check (Look in both Title and Series/Publisher column as Libgen is messy)
-                        title_match = norm_title in row_title or row_title in norm_title
-                        # Fallback: check all first 4 columns for the title if not found
+                        # Title check: row_title must contain norm_title. 
+                        # Avoid reverse check 'row_title in norm_title' to prevent empty/partial matches.
+                        title_match = len(row_title) > 2 and norm_title in row_title
+                        
+                        # Fallback: check other columns but be strict
                         if not title_match:
-                            title_match = any(norm_title in t for t in col_text)
+                            for t in col_text[2:]: # Check title/publisher columns
+                                if len(t) > 2 and norm_title in t:
+                                    title_match = True
+                                    break
 
-                        # Author check (Look in all first 4 columns as well)
-                        author_match = any(p in t for p in author_parts for t in col_text) if author_parts else True
+                        # Author check: Must find at least one significant part of author name in author column
+                        author_match = False
+                        if author_parts:
+                            # Check specifically in the author column (col 1)
+                            if any(p in row_author for p in author_parts):
+                                author_match = True
+                            # Fallback: check if it's anywhere else if not in author col
+                            elif any(p in t for p in author_parts for t in col_text):
+                                author_match = True
+                        else:
+                            author_match = True
 
                         if is_epub and is_eng and title_match and author_match:
                             ads = r.find('a', href=re.compile(r"ads\.php"))

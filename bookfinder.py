@@ -226,18 +226,31 @@ class ScraperEngine:
                     cols = row.find_all('td')
                     if len(cols) >= 9:
                         col_text = [self.normalize_title(c.get_text()) for c in cols[:4]]
-                        row_author = " ".join(col_text[1:2])
-                        row_title = " ".join(col_text[2:4])
+                        row_author = col_text[1] if len(col_text) > 1 else ""
+                        row_title = col_text[2] if len(col_text) > 2 else ""
+                        
                         row_lang = cols[6].get_text().lower()
                         row_ext = cols[8].get_text().lower()
 
                         is_epub = 'epub' in row_ext
                         is_eng = any(l in row_lang for l in ['english', 'eng']) or not row_lang.strip()
                         
-                        title_match = norm_title in row_title or row_title in norm_title
-                        if not title_match: title_match = any(norm_title in t for t in col_text)
+                        # Use strictly forward-matching title check with length guard
+                        title_match = len(row_title) > 2 and norm_title in row_title
+                        if not title_match:
+                            for t in col_text[2:]:
+                                if len(t) > 2 and norm_title in t:
+                                    title_match = True
+                                    break
                         
-                        author_match = any(p in t for p in author_parts for t in col_text) if author_parts else True
+                        author_match = False
+                        if author_parts:
+                            if any(p in row_author for p in author_parts):
+                                author_match = True
+                            elif any(p in t for p in author_parts for t in col_text):
+                                author_match = True
+                        else:
+                            author_match = True
 
                         if is_epub and is_eng and title_match and author_match:
                             for l in cols[1].find_all('a', href=True):
