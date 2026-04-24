@@ -8,6 +8,7 @@ import ebookmeta
 import zipfile
 import sys
 import shutil
+import unicodedata
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Generator, Callable
@@ -19,7 +20,12 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 
 def normalize_text(text: str) -> str:
     if not text: return ""
-    t = text.lower()
+    # NFKC folds compatibility forms and replaces e.g. NBSP with regular space.
+    t = unicodedata.normalize('NFKC', text)
+    # Drop zero-width / format characters (Cf) — OpenLibrary data sometimes carries
+    # U+200B between words, which would otherwise fuse them into a single token.
+    t = ''.join(c for c in t if unicodedata.category(c) != 'Cf')
+    t = t.lower()
     # Replace dots, underscores, and common punctuation with spaces BEFORE stripping
     t = re.sub(r'[\._\-]', ' ', t)
     # Strip subtitles and parentheses
@@ -462,156 +468,121 @@ _NON_ENG_ARTICLE_RE = re.compile(
 _NON_LATIN_RE = re.compile(r"[Ѐ-ӿ一-鿿぀-ヿ؀-ۿ֐-׿]")
 
 
-class WikiBibliography:
-    """Pulls novel and short-story-collection titles from an author's Wikipedia page.
+class GoogleBooksBibliography:
+    """Enumerates an author's books via the Google Books API.
 
-    The MediaWiki API gets us HTML we can walk. We track section headings with a simple
-    level-stack so that sub-sections inherit their parent's "wanted" state — the Dark
-    Tower books under "Novels > The Dark Tower series" still count as novels, but
-    a "Non-fiction" h2 cleanly turns the filter off until the next wanted heading.
+    Structured JSON. Each volume carries language, categories ("Fiction / ..."),
+    published date and ISBNs, so we can filter inline without scraping. No API
+    key required at the free tier (1,000 requests/day, well above anything a
+    homelab user will do).
     """
 
-    API = "https://en.wikipedia.org/w/api.php"
+    API = "https://www.googleapis.com/books/v1/volumes"
+    PAGE_SIZE = 40
+    MAX_PAGES = 10  # 400 volumes is more than any real author's bibliography + editions
 
-    WANTED = (
-        re.compile(r'\bnovels?\b', re.I),
-        re.compile(r'\bnovellas?\b', re.I),
-        re.compile(r'\bshort[\s\-]?story collections?\b', re.I),
-        re.compile(r'\bstory collections?\b', re.I),
-        re.compile(r'\bfiction collections?\b', re.I),
-        # Catch author pages that use a flat "Bibliography" section with series subsections
-        # (e.g. Sarah J. Maas). The stack logic lets series-named sub-headings inherit from here.
-        re.compile(r'\bbibliograph(y|ies)\b', re.I),
-        re.compile(r'\bpublished works\b', re.I),
-        re.compile(r'\bnotable works\b', re.I),
-        re.compile(r'\bselected works\b', re.I),
-        re.compile(r'\bmain works\b', re.I),
-    )
-
-    UNWANTED = (
-        re.compile(r'\bnon[\s\-]?fiction\b', re.I),
-        re.compile(r'\banthologies?\s+(?:edited|contributed)\b', re.I),
-        re.compile(r'\bas\s+editor\b', re.I),
-        re.compile(r'\bscreenplays?\b', re.I),
-        re.compile(r'\bessays?\b', re.I),
-        re.compile(r'\bpoetry\b', re.I),
-        re.compile(r'\bshort fiction\b(?! collection)', re.I),
-        re.compile(r"\bchildren's\b", re.I),
-        re.compile(r'\bmemoir\b', re.I),
-        re.compile(r'\bbiograph(y|ies) of\b', re.I),  # more specific than 'biography' to
-        re.compile(r'\babout the author\b', re.I),    # avoid killing "Bibliography"
-        re.compile(r'\bcontributions?\b', re.I),
-        re.compile(r'\bforewor[dt]s?\b', re.I),
-        re.compile(r'\buncollected\b', re.I),
-        re.compile(r'\bsee also\b', re.I),
-        re.compile(r'\breferences?\b', re.I),
-        re.compile(r'\bworks cited\b', re.I),
-        re.compile(r'\bexternal links?\b', re.I),
-        re.compile(r'\bfurther reading\b', re.I),
-        re.compile(r'\bnotes?\b', re.I),
-        re.compile(r'\badaptations?\b', re.I),
-        re.compile(r'\bfilmography\b', re.I),
-        re.compile(r'\bdiscography\b', re.I),
-        re.compile(r'\bawards?\b', re.I),
-    )
-
-    def __init__(self, client: httpx.Client):
+    def __init__(self, client: httpx.Client, log: Callable = lambda _: None):
         self.client = client
+        self.log = log
 
-    def fetch(self, author_name: str) -> Optional[Dict[str, str]]:
-        """Return a dict mapping normalized titles to their display form, or None if
-        Wikipedia isn't usable for this author.
+    def fetch(self, author_name: str) -> List[Dict]:
+        """Return a deduped list of the author's English fiction titles with
+        year + ISBNs. Empty list if the query yields nothing usable.
         """
         if not author_name:
-            return None
-        for query in (f"{author_name} bibliography", author_name):
-            page = self._search(query)
-            if not page:
-                continue
-            html = self._parse_page(page)
-            if not html:
-                continue
-            titles = self._extract(html)
-            if titles:
-                return titles
-        return None
+            return []
+        author_norm = normalize_text(author_name)
+        author_tokens = [t for t in author_norm.split() if len(t) > 1]
 
-    def _search(self, query: str) -> Optional[str]:
-        try:
-            resp = self.client.get(self.API, params={
-                "action": "query", "list": "search", "srsearch": query,
-                "format": "json", "srlimit": 1,
-            })
-            if resp.status_code != 200:
-                return None
-            hits = resp.json().get("query", {}).get("search", [])
-            return hits[0]["title"] if hits else None
-        except Exception:
-            return None
+        books: List[Dict] = []
+        seen: Dict[str, Dict] = {}
 
-    def _parse_page(self, page_title: str) -> Optional[str]:
-        try:
-            resp = self.client.get(self.API, params={
-                "action": "parse", "page": page_title, "format": "json", "prop": "text",
-            })
-            if resp.status_code != 200:
-                return None
-            return resp.json().get("parse", {}).get("text", {}).get("*")
-        except Exception:
-            return None
+        for page in range(self.MAX_PAGES):
+            try:
+                resp = self.client.get(self.API, params={
+                    "q": f'inauthor:"{author_name}"',
+                    "maxResults": self.PAGE_SIZE,
+                    "startIndex": page * self.PAGE_SIZE,
+                    "langRestrict": "en",
+                    "printType": "books",
+                })
+                if resp.status_code != 200:
+                    break
+                data = resp.json()
+            except Exception:
+                break
 
-    def _extract(self, html: str) -> Dict[str, str]:
-        soup = BeautifulSoup(html, 'html.parser')
-        content = soup.find('div', class_='mw-parser-output') or soup
-        titles: Dict[str, str] = {}
-        # Stack of (heading_level, wanted) — enables nested sections to inherit.
-        stack: List[Tuple[int, bool]] = []
+            items = data.get("items") or []
+            if not items:
+                break
 
-        for el in content.find_all(True, recursive=True):
-            if el.name in ('h2', 'h3', 'h4', 'h5', 'h6'):
-                level = int(el.name[1])
-                text = el.get_text(' ', strip=True)
-                text = re.sub(r'\[\s*edit\s*\]', '', text, flags=re.I).strip()
-                wanted = any(p.search(text) for p in self.WANTED)
-                unwanted = any(p.search(text) for p in self.UNWANTED)
+            for item in items:
+                vol = item.get("volumeInfo") or {}
+                title = (vol.get("title") or "").strip()
+                if not title or _CRUFT_TITLE_RE.search(title):
+                    continue
 
-                while stack and stack[-1][0] >= level:
-                    stack.pop()
+                # Author match — the inauthor: query is fuzzy and will include
+                # "Summary of ... by Some Other Author" volumes that merely mention
+                # the real author. Require every significant token of the searched
+                # author name to appear in the volume's author list.
+                authors = vol.get("authors") or []
+                if author_tokens:
+                    joined = normalize_text(" ".join(authors))
+                    if not all(tok in joined for tok in author_tokens):
+                        continue
 
-                if wanted and not unwanted:
-                    stack.append((level, True))
-                elif unwanted:
-                    stack.append((level, False))
+                # English only. langRestrict is a hint, not a guarantee.
+                lang = vol.get("language")
+                if lang and lang != "en":
+                    continue
+
+                # Fiction only. Some fiction volumes lack categories entirely;
+                # accept those but reject volumes whose categories are present and
+                # don't contain "Fiction".
+                categories = vol.get("categories") or []
+                if categories:
+                    cat_str = " | ".join(categories).lower()
+                    if "fiction" not in cat_str:
+                        continue
+
+                norm = normalize_text(title)
+                if not norm:
+                    continue
+
+                year = None
+                m = re.match(r'(\d{4})', vol.get("publishedDate") or "")
+                if m:
+                    year = int(m.group(1))
+
+                isbns = []
+                for ident in vol.get("industryIdentifiers") or []:
+                    if ident.get("type") in ("ISBN_10", "ISBN_13"):
+                        ident_val = (ident.get("identifier") or "").strip()
+                        if ident_val:
+                            isbns.append(ident_val)
+
+                # Dedupe by normalized title; prefer the entry with the earliest
+                # publication year (the original edition) and richer ISBN data.
+                if norm in seen:
+                    existing = seen[norm]
+                    if year and (existing.get("year") is None or year < existing["year"]):
+                        existing["year"] = year
+                    # Merge ISBNs (keep ISBN-13 first if possible)
+                    for i in isbns:
+                        if i not in existing["isbns"]:
+                            existing["isbns"].append(i)
                 else:
-                    parent_wanted = stack[-1][1] if stack else False
-                    stack.append((level, parent_wanted))
-                continue
+                    seen[norm] = {"title": title, "year": year, "isbns": isbns}
 
-            if not (stack and stack[-1][1]):
-                continue
+            if len(items) < self.PAGE_SIZE:
+                break
 
-            if el.name in ('i', 'em', 'cite'):
-                # Skip citations, hatnotes, and infobox content — those aren't bibliography entries.
-                if el.find_parent('sup'):
-                    continue
-                if el.find_parent(class_='hatnote'):
-                    continue
-                if el.find_parent('table', class_='infobox'):
-                    continue
-                # Only accept italics inside list items, table cells, or definition lists —
-                # random italicized phrases in prose paragraphs aren't book titles.
-                parents = {p.name for p in el.parents if p.name}
-                if not (parents & {'li', 'td', 'th', 'dd'}):
-                    continue
-                raw = el.get_text(' ', strip=True)
-                # Strip Wikipedia disambiguation suffixes like "Carrie (novel)".
-                display = re.sub(r'\s*\((?:novel|book|novella|short story|collection|anthology|series)\)\s*$',
-                                 '', raw, flags=re.I).strip()
-                norm = normalize_text(display)
-                if norm and len(norm) >= 2 and norm not in titles:
-                    titles[norm] = display
-
-        return titles
+        books = list(seen.values())
+        # Prefer ISBN-13 at position [0] so mirror searches hit the modern identifier.
+        for b in books:
+            b["isbns"].sort(key=lambda x: (len(x) != 13, x))
+        return books
 
 
 class MetadataFetcher:
@@ -642,59 +613,32 @@ class MetadataFetcher:
         except: return []
 
     def get_author_books(self, author_id: str, author_name: str = "", query: Optional[str] = None) -> List[Dict]:
-        """Return the author's novels and short story collections, English only.
+        """Return the author's English fiction bibliography.
 
-        Two-stage: pull every work OpenLibrary lists for this author, then filter.
-        Wikipedia's bibliography page is the preferred filter — if we can find one
-        with recognisable "Novels" / "Short story collections" headings, only works
-        whose normalized title appears under those sections are kept. For obscure
-        authors (no Wikipedia page, or one we can't parse), fall back to filtering
-        on OpenLibrary's own subject tags and an English-title heuristic.
+        Primary source is the Google Books API — structured JSON with language,
+        categories, publish date and ISBNs, so we filter inline. For very obscure
+        authors where Google Books returns nothing, fall back to OpenLibrary's
+        work-level endpoint filtered on subject tags.
         """
-        raw = self._fetch_ol_works(author_id)
+        books: List[Dict] = []
 
-        wiki_titles: Optional[Dict[str, str]] = None
-        try:
-            wiki_titles = WikiBibliography(self.client).fetch(author_name)
-        except Exception:
-            wiki_titles = None
+        if author_name:
+            try:
+                books = GoogleBooksBibliography(self.client).fetch(author_name)
+            except Exception:
+                books = []
 
-        if wiki_titles:
-            # Wikipedia is the authority for bibliography membership. For each Wiki entry,
-            # prefer the OL record (gives us publication year) but fall back to a bare
-            # title if OL is missing it under this author key.
-            ol_by_norm = {normalize_text(b["title"]): b for b in raw}
-            books = []
-            for wnorm, wdisplay in wiki_titles.items():
-                if wnorm in ol_by_norm:
-                    books.append(ol_by_norm[wnorm])
-                else:
-                    books.append({"title": wdisplay, "year": None, "isbns": []})
-        else:
+        if not books:
+            raw = self._fetch_ol_works(author_id)
             books = [b for b in raw if self._passes_ol_filter(b)]
+            for b in books:
+                b.pop("_subjects", None)
 
         if query:
             q = normalize_text(query)
             books = [b for b in books if q in normalize_text(b["title"])]
 
-        # Dedupe by normalized title; prefer the entry that has a year.
-        best: Dict[str, Dict] = {}
-        for b in books:
-            norm = normalize_text(b["title"])
-            if not norm:
-                continue
-            cur = best.get(norm)
-            if cur is None:
-                best[norm] = b
-            elif cur.get("year") is None and b.get("year") is not None:
-                best[norm] = b
-            elif b.get("year") and cur.get("year") and b["year"] < cur["year"]:
-                best[norm] = b
-
-        result = sorted(best.values(), key=lambda x: (x.get("year") or 9999, x.get("title", "")))
-        for b in result:
-            b.pop("_subjects", None)
-        return result
+        return sorted(books, key=lambda x: (x.get("year") or 9999, x.get("title", "")))
 
     def _fetch_ol_works(self, author_id: str) -> List[Dict]:
         """Fetch raw works for this author from OpenLibrary, no filtering yet."""
