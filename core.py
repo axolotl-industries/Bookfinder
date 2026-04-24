@@ -96,18 +96,11 @@ def create_robust_ssl_context():
 
 async def resolve_annas_domain(log_func: Callable) -> str:
     mirrors = ["https://annas-archive.se", "https://annas-archive.li", "https://annas-archive.gs"]
-    log_func("Resolving Anna's Archive mirror...")
     for m in mirrors:
         try:
-            log_func(f"Checking {m}...")
             async with httpx.AsyncClient(timeout=5.0) as client:
-                if (await client.head(m)).status_code < 400:
-                    log_func(f"Using mirror: {m}")
-                    return m
-        except Exception as e:
-            log_func(f"Mirror {m} failed or timed out: {e}")
-            continue
-    log_func("All mirrors failed; using fallback https://annas-archive.gl")
+                if (await client.head(m)).status_code < 400: return m
+        except: continue
     return "https://annas-archive.gl"
 
 MAX_EPUB_BYTES = 50 * 1024 * 1024  # 50MB — EPUBs are small; anything bigger is a movie/audiobook/rar pack.
@@ -167,12 +160,10 @@ class NewznabScraper:
 
         try:
             async with httpx.AsyncClient(timeout=15.0, verify=False, follow_redirects=True, headers=headers) as client:
-                req = client.build_request("GET", url, params=params)
-                self.log(f"Requesting Prowlarr URL: {req.url}")
-                resp = await client.send(req)
+                resp = await client.get(url, params=params)
 
                 if resp.status_code != 200:
-                    self.log(f"Usenet API error: HTTP {resp.status_code} - Body: {resp.text[:200]}")
+                    self.log(f"Usenet API error: HTTP {resp.status_code}")
                     return []
 
                 ctype = resp.headers.get("Content-Type", "").lower()
@@ -388,10 +379,7 @@ class SabnzbdClient:
         self.log = log_func
 
     async def add_url(self, nzb_url: str, title: str) -> Optional[str]:
-        if not self.url or not self.api_key:
-            self.log("SABnzbd add skipped: URL or Key not configured.")
-            return None
-        self.log(f"Submitting NZB to SABnzbd: {self.url}")
+        if not self.url or not self.api_key: return None
         params = {
             "mode": "addurl",
             "name": nzb_url,
@@ -771,13 +759,9 @@ class ScraperEngine:
         self.client = httpx.AsyncClient(verify=False, timeout=20.0, follow_redirects=True, headers={"User-Agent": UA})
 
     async def start(self):
-        self.log("Initializing ScraperEngine...")
         self.annas_base = await resolve_annas_domain(self.log)
-        self.log("Starting Playwright (this may take a few seconds)...")
         self.playwright = await async_playwright().start()
-        self.log("Launching Chromium...")
         self.browser = await self.playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"])
-        self.log("Browser launched successfully.")
 
     async def stop(self):
         try:
