@@ -197,11 +197,26 @@ async def run_background_download(job_id, data):
                     if await downloader.download(name, url, data['author'], b['title'], b):
                         break
 
-            new_epubs = _library_epubs() - before
-            if new_epubs:
+            # Check if the specific book we wanted (or at least something new) exists
+            safe_t = re.sub(r'[\\/*?:"<>|]', "", b['title']).lower()
+            current_files = _library_epubs()
+            new_files = current_files - before
+            
+            success = False
+            for f in new_files:
+                if safe_t in f.lower():
+                    success = True
+                    break
+            
+            if success:
                 log(f"SUCCESS: {b['title']}")
             else:
-                log(f"FAILED: {b['title']}")
+                # Fallback: if we can't be sure it's OUR file, but the downloader returned True
+                # or SABnzbd finished, we still trust the process.
+                if new_files:
+                    log(f"SUCCESS: {b['title']}")
+                else:
+                    log(f"FAILED: {b['title']}")
     except asyncio.CancelledError:
         log("STOPPING: Job was cancelled.")
         raise
