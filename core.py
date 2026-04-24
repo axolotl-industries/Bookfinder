@@ -10,7 +10,10 @@ import sys
 import shutil
 import unicodedata
 import xml.etree.ElementTree as ET
+from langdetect import detect, DetectorFactory
 from pathlib import Path
+
+DetectorFactory.seed = 0
 from typing import List, Dict, Optional, Tuple, Generator, Callable
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, Browser
@@ -456,26 +459,39 @@ _CRUFT_TITLE_RE = re.compile(
     r"\b(box set|trilogy|omnibus|selections|summary|analysis of|study guide|"
     r"companion|trivia|unofficial|vol\.?\s*\d+|volume\s*\d+|issue|magazine|"
     r"year['’]?s best|antholog|notebook|diary|journal|calendar|catalog|"
-    r"textbook|puzzle|brainteaser|crafts?|curriculum|workbook|teacher['’]?s guide)\b",
+    r"textbook|puzzle|brainteaser|crafts?|curriculum|workbook|teacher['’]?s guide|"
+    r"serise|collection|complete collection|set of \d+|pack of \d+|bundle)\b",
     re.I,
 )
 
 # Transliterated titles often have these patterns (common in Hebrew/Russian/etc transliterations)
-_TRANSLITERATED_RE = re.compile(r"([ḳḥṭṣẓ]|^ha-)", re.I)
+# Expanded to catch more common transliteration marks and specific words.
+_TRANSLITERATED_RE = re.compile(r"([ḳḥṭṣẓśšžāīū]|^ha-|^ve-|^v-|^de-|^le-|^die-|^der-|^das-)", re.I)
+
+# Common English words that appear in titles.
+_ENGLISH_SURE_RE = re.compile(r"\b(the|and|for|with|from|that|this|they|them|your|been|have|will|shall|would|should|could|some|more|most|last|next|very|many|much|little|good|great|best|world|life|time|years?|days?|man|woman|child|house|place|thing|book|story|tales?|novels?|fiction|horror|fantasy|science|mystery|thriller|adventure|ghost|death|dark|light|white|black|red|blue|green|gold|silver|iron|stone|wood|fire|water|wind|earth|sky|sea|ocean|island|mountain|river|road|way|path|street|city|town|village|king|queen|prince|princess|lord|lady|knight|wizard|witch|magic|dragon|monster|beast|animal|cat|dog|bird|horse|wolf|lion|tiger|bear|eagle|snake|fish|tree|flower|sun|moon|star|night|day|morning|evening|winter|summer|spring|autumn|fall|war|peace|love|hate|fear|hope|dream|truth|lie|soul|heart|mind|body|blood|bone|hand|eye|face|head|voice|word|name|friend|enemy|hero|villain|god|devil|angel|heaven|hell|magic|power|sword|shield|armor|gun|knife|bullet|secret|hidden|lost|found|forgotten|remembered|beyond|between|within|without|through|above|below|under|over|across|against|around|about|after|before|since|until|while|during|because|although|unless|whether|either|neither|both|each|every|all|none|any|only|just|now|then|always|never|often|sometimes|seldom|rarely|wyrd|discworld|hitchhiker|hitchhikers|hitchhikers|hitch-hiker|hitch-hikers|zaphod|trillian|marvin|ford|beeblebrox|prefect|dent|vogon|vogons)\b", re.I)
 
 # Non-English articles that start translated titles (kept to unambiguously-foreign cases).
 _NON_ENG_ARTICLE_RE = re.compile(
-    r"^(una?|unos|unas|el|los|las|"
-    r"le|les|du|"
+    r"^(una?|unos|unas|el|los|las|del|al|"
+    r"le|les|du|la|une?|des|aux|"
     r"der|die|das|ein|eine|einen|dem|den|"
     r"het|een|"
-    r"il|lo|gli|"
-    r"um|uma|os)\s+",
+    r"il|lo|gli|un['’]|una['’]|i|le|"
+    r"um|uma|os|as|dos|das|no|na|nos|nas)\s+",
     re.I,
 )
 
-# Scripts that unambiguously aren't English (Cyrillic, CJK, Hiragana/Katakana, Arabic, Hebrew).
-_NON_LATIN_RE = re.compile(r"[Ѐ-ӿ一-鿿぀-ヿ؀-ۿ֐-׿]")
+# Scripts that unambiguously aren't English (Cyrillic, CJK, Hiragana/Katakana, Arabic, Hebrew, Greek).
+_NON_LATIN_RE = re.compile(r"[Ѐ-ӿ一-鿿぀-ヿ؀-ۿ֐-׿Ͱ-Ͽ]")
+
+# Obvious non-English words that frequently appear in titles for noted authors
+_FOREIGN_WORDS_RE = re.compile(
+    r"\b(tome|livre|roman|edizione|edicion|biblioteca|coletânea|coleccion|enchanted|espagnol|français|deutsch|italiano|português|hebrew|russian|japanese|chinese|korean|illustrata|ilustrada|hardcover|paperback|ebook|epub|mobi|pdf|azw3|edicao|comemorativa|tradicional|voluntaria|aventuras|escaleras|historia|cuento|relato|libro|bos|koltuk|kitap|yayinlari|yazar|kapak|canto|cuco|post|ab|nur)\b",
+    re.I,
+)
+
+import random
 
 class GoogleBooksBibliography:
     """Enumerates an author's books via the Google Books API.
@@ -507,18 +523,26 @@ class GoogleBooksBibliography:
         seen: Dict[str, Dict] = {}
 
         for page in range(self.MAX_PAGES):
-            try:
-                resp = await self.client.get(self.API, params={
-                    "q": f'inauthor:"{author_name}"',
-                    "maxResults": self.PAGE_SIZE,
-                    "startIndex": page * self.PAGE_SIZE,
-                    "langRestrict": "en",
-                    "printType": "books",
-                })
-                if resp.status_code != 200:
+            for attempt in range(3):
+                try:
+                    resp = await self.client.get(self.API, params={
+                        "q": f'inauthor:"{author_name}"',
+                        "maxResults": self.PAGE_SIZE,
+                        "startIndex": page * self.PAGE_SIZE,
+                        "langRestrict": "en",
+                        "printType": "books",
+                    })
+                    if resp.status_code == 429:
+                        await asyncio.sleep(2 + random.random() * 2)
+                        continue
+                    if resp.status_code != 200:
+                        break
+                    data = resp.json()
                     break
-                data = resp.json()
-            except Exception:
+                except Exception:
+                    await asyncio.sleep(1)
+                    continue
+            else: # All attempts failed for this page
                 break
 
             items = data.get("items") or []
@@ -528,20 +552,16 @@ class GoogleBooksBibliography:
             for item in items:
                 vol = item.get("volumeInfo") or {}
                 title = (vol.get("title") or "").strip()
-                # Loosen the cruft filter slightly to allow valid titles that might contain 'vol' or 'volume'
-                if not title or _CRUFT_TITLE_RE.search(title) or _TRANSLITERATED_RE.search(title):
-                    if not (("vol" in title.lower() or "volume" in title.lower()) and ":" in title):
-                        continue
+                if self._is_trash_title(title):
+                    continue
                 
                 # Filter out obvious non-authoritative publishers (curriculum, study guides)
                 publisher = (vol.get("publisher") or "").lower()
-                if "moving beyond the page" in publisher or "bright summaries" in publisher:
+                if "moving beyond the page" in publisher or "bright summaries" in publisher or "sparknotes" in publisher:
                     continue
 
-                # Author match — the inauthor: query is fuzzy and will include
-                # "Summary of ... by Some Other Author" volumes that merely mention
-                # the real author. Require every significant token of the searched
-                # author name to appear in the volume's author list.
+                # Author match — the inauthor: query is fuzzy.
+                # Require the primary author name to be present in the volume's authors.
                 authors = vol.get("authors") or []
                 if author_tokens:
                     joined = normalize_text(" ".join(authors))
@@ -553,9 +573,7 @@ class GoogleBooksBibliography:
                 if lang and lang != "en":
                     continue
 
-                # Fiction only. Some fiction volumes lack categories entirely;
-                # accept those but reject volumes whose categories are present and
-                # don't contain "Fiction" or other known fiction markers.
+                # Fiction only.
                 categories = vol.get("categories") or []
                 if categories:
                     cat_str = " | ".join(categories).lower()
@@ -585,8 +603,8 @@ class GoogleBooksBibliography:
                     existing = seen[norm]
                     if year and (existing.get("year") is None or year < existing["year"]):
                         existing["year"] = year
-                        existing["title"] = title # Prefer title of the earliest edition
-                    # Merge ISBNs (keep ISBN-13 first if possible)
+                        existing["title"] = title
+                    # Merge ISBNs
                     for i in isbns:
                         if i not in existing["isbns"]:
                             existing["isbns"].append(i)
@@ -597,10 +615,33 @@ class GoogleBooksBibliography:
                 break
 
         books = list(seen.values())
-        # Prefer ISBN-13 at position [0] so mirror searches hit the modern identifier.
         for b in books:
             b["isbns"].sort(key=lambda x: (len(x) != 13, x))
         return books
+
+    @staticmethod
+    def _is_trash_title(title: str) -> bool:
+        if not title: return True
+        if _CRUFT_TITLE_RE.search(title): return True
+        if _TRANSLITERATED_RE.search(title): return True
+        if _NON_ENG_ARTICLE_RE.search(title): return True
+        if _NON_LATIN_RE.search(title): return True
+        if _FOREIGN_WORDS_RE.search(title): return True
+        
+        # Only use langdetect for reasonably long titles to avoid false positives on short ones.
+        if len(title) > 25:
+            try:
+                lang = detect(title)
+                if lang != 'en':
+                    # If it's a "not-English" detection, but contains very common English markers,
+                    # we might still want it (e.g. Isaac Asimov's science titles).
+                    english_tokens = _ENGLISH_SURE_RE.findall(title)
+                    # Require at least 2 DISTINCT English sure words.
+                    if len(set(t.lower() for t in english_tokens)) < 2:
+                        return True
+            except:
+                pass
+        return False
 
 
 class MetadataFetcher:
@@ -681,7 +722,7 @@ class MetadataFetcher:
                 break
             for work in entries:
                 title = (work.get("title") or "").strip()
-                if not title or _CRUFT_TITLE_RE.search(title) or _TRANSLITERATED_RE.search(title):
+                if GoogleBooksBibliography._is_trash_title(title):
                     continue
                 books.append({
                     "title": title,
@@ -697,9 +738,7 @@ class MetadataFetcher:
     @classmethod
     def _passes_ol_filter(cls, book: Dict) -> bool:
         title = book["title"]
-        if _CRUFT_TITLE_RE.search(title):
-            return False
-        if not cls._is_english_title(title):
+        if GoogleBooksBibliography._is_trash_title(title):
             return False
         return cls._is_fiction_work(book.get("_subjects") or [])
 
@@ -711,14 +750,6 @@ class MetadataFetcher:
         if any(f in s_all for f in _FICTION_SUBJECTS):
             return True
         return not any(n in s_all for n in _NON_FICTION_SUBJECTS)
-
-    @staticmethod
-    def _is_english_title(title: str) -> bool:
-        if _NON_LATIN_RE.search(title):
-            return False
-        if _NON_ENG_ARTICLE_RE.search(title):
-            return False
-        return True
 
     @staticmethod
     def _extract_year(date_value) -> Optional[int]:
