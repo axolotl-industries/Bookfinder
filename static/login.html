@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bookfinder — Sign in</title>
+    <style>
+        :root {
+            --primary: #0071e3;
+            --bg: #f5f5f7;
+            --card-bg: #ffffff;
+            --text: #1d1d1f;
+            --text-secondary: #86868b;
+            --border: #d2d2d7;
+            --error-bg: #ffe9e9;
+            --error-text: #b00020;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #000000;
+                --card-bg: #1c1c1e;
+                --text: #f5f5f7;
+                --text-secondary: #a1a1a6;
+                --border: #3a3a3c;
+                --error-bg: #3a1515;
+                --error-text: #ff8a8a;
+            }
+        }
+        body {
+            font-family: -apple-system, system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+            transition: background 0.3s, color 0.3s;
+        }
+        .card {
+            background: var(--card-bg);
+            padding: 32px;
+            border-radius: 12px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+            width: 100%;
+            max-width: 360px;
+        }
+        h1 {
+            margin: 0 0 8px;
+            font-size: 28px;
+            text-align: center;
+        }
+        .subtitle {
+            margin: 0 0 24px;
+            text-align: center;
+            color: var(--text-secondary);
+            font-size: 14px;
+        }
+        input {
+            padding: 14px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            font-size: 16px;
+            width: 100%;
+            box-sizing: border-box;
+            margin-bottom: 12px;
+            background: var(--bg);
+            color: var(--text);
+        }
+        button {
+            padding: 14px;
+            background: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-weight: 600;
+            font-size: 16px;
+            width: 100%;
+            cursor: pointer;
+        }
+        button:hover { opacity: 0.9; }
+        .error {
+            background: var(--error-bg);
+            color: var(--error-text);
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 16px;
+            font-size: 14px;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>📚 Bookfinder</h1>
+        <p class="subtitle">Sign in with your Emby account</p>
+        <!-- ERROR -->
+        <form method="post" action="/login">
+            <input name="username" type="text" placeholder="Username" autocomplete="username" autocapitalize="off" autocorrect="off" required autofocus>
+            <input name="password" type="password" placeholder="Password" autocomplete="current-password" required>
+            <button type="submit">Sign in</button>
+        </form>
+    </div>
+</body>
+</html>

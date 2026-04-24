@@ -183,6 +183,56 @@ class NewznabScraper:
                 results.append({"title": res_title, "link": link})
         return results
 
+class EmbyAuth:
+    """Authenticates users against an Emby server using /Users/AuthenticateByName.
+
+    We only use Emby as an identity source — we discard the returned AccessToken and
+    issue our own signed session cookie. A 200 response means the user is enabled and
+    the password is correct; Emby will 401 disabled users on its own.
+    """
+
+    CLIENT_HEADER = (
+        'MediaBrowser Client="Bookfinder", Device="Bookfinder", '
+        'DeviceId="bookfinder-auth", Version="1.0.0"'
+    )
+
+    def __init__(self, server_url: str):
+        self.server_url = (server_url or "").strip().rstrip("/")
+
+    async def authenticate(self, username: str, password: str) -> Optional[Dict]:
+        if not self.server_url or not username or not password:
+            return None
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-Emby-Authorization": self.CLIENT_HEADER,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=10.0, verify=False, follow_redirects=True) as client:
+                resp = await client.post(
+                    f"{self.server_url}/Users/AuthenticateByName",
+                    headers=headers,
+                    json={"Username": username, "Pw": password},
+                )
+        except Exception:
+            return None
+        if resp.status_code != 200:
+            return None
+        try:
+            data = resp.json()
+        except Exception:
+            return None
+        user = data.get("User") or {}
+        name = user.get("Name")
+        if not name:
+            return None
+        return {
+            "name": name,
+            "id": user.get("Id"),
+            "is_admin": bool((user.get("Policy") or {}).get("IsAdministrator")),
+        }
+
+
 class SabnzbdClient:
     def __init__(self, url: str, api_key: str, log_func: Callable):
         self.url = url.strip().rstrip('/')

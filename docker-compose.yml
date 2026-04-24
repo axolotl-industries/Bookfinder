@@ -5,6 +5,18 @@ services:
     build: .
     ports:
       - "80:80"
+    environment:
+      # --- Auth ---
+      # Point this at your Emby server. Bookfinder verifies logins against
+      # /Users/AuthenticateByName, so whoever can log in to Emby can log in here.
+      - EMBY_URL=${EMBY_URL:-http://emby:8096}
+      # Long random string used to sign session cookies. If unset, a per-process
+      # random secret is used and everyone is signed out on each container restart.
+      #   openssl rand -base64 48
+      - SESSION_SECRET=${SESSION_SECRET}
+      # Set to 'true' once Bookfinder is only reachable over HTTPS (e.g. behind
+      # Cloudflare). Browsers will then refuse to send the session cookie over http.
+      - SESSION_COOKIE_SECURE=${SESSION_COOKIE_SECURE:-false}
     volumes:
       - ./downloads:/app/downloads
     restart: unless-stopped

@@ -60,15 +60,18 @@
         #log { background: var(--log-bg); color: var(--log-text); padding: 15px; border-radius: 10px; height: 400px; overflow-y: auto; font-family: monospace; white-space: pre-wrap; font-size: 13px; border: 1px solid var(--border); }
         .spinner { display: inline-block; width: 20px; height: 20px; border: 3px solid rgba(255,255,255,.3); border-radius: 50%; border-top-color: #fff; animation: spin 1s ease-in-out infinite; margin-right: 10px; vertical-align: middle; }
         @keyframes spin { to { transform: rotate(360deg); } }
-        .settings-link { text-align: right; margin-bottom: 10px; }
-        .settings-link a { color: var(--primary); text-decoration: none; font-size: 14px; }
+        .settings-link { text-align: right; margin-bottom: 10px; display: flex; justify-content: flex-end; gap: 16px; }
+        .settings-link a, .settings-link button.link { color: var(--primary); text-decoration: none; font-size: 14px; background: none; border: none; padding: 0; cursor: pointer; width: auto; font-weight: normal; }
         .config-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 10px; }
         @media (max-width: 600px) { .config-grid { grid-template-columns: 1fr; } }
     </style>
 </head>
 <body>
     <h1>📚 Bookfinder</h1>
-    <div class="settings-link"><a href="#" onclick="toggleSettings()">⚙️ Connection Settings</a></div>
+    <div class="settings-link">
+        <a href="#" onclick="toggleSettings(); return false;">⚙️ Connection Settings</a>
+        <form method="post" action="/logout" style="margin: 0;"><button type="submit" class="link">Sign out</button></form>
+    </div>
     
     <div id="settings-card" class="card" style="display:none;">
         <div class="config-grid">
@@ -115,7 +118,17 @@
 
     <script>
         let currentBooks = [], currentAuthor = "", logIndex = 0, currentJobId = null;
-        
+
+        async function apiFetch(url, options) {
+            const res = await fetch(url, options);
+            if (res.status === 401) {
+                window.location.href = '/login';
+                // Stall the caller so no further .then()/await keeps running.
+                return new Promise(() => {});
+            }
+            return res;
+        }
+
         // Load settings
         ['usenet_url', 'usenet_key', 'sab_url', 'sab_key'].forEach(k => {
             document.getElementById(k).value = localStorage.getItem(k) || '';
@@ -138,7 +151,7 @@
             document.getElementById('results-card').style.display = 'none';
 
             try {
-                const res = await fetch(`/search?author=${encodeURIComponent(a)}`);
+                const res = await apiFetch(`/search?author=${encodeURIComponent(a)}`);
                 const data = await res.json();
                 if(data.error) return alert(data.error);
                 
@@ -173,7 +186,7 @@
 
             try {
                 const q = document.getElementById('query').value;
-                const res = await fetch(`/author_books?author_id=${id}&author_name=${encodeURIComponent(name)}&query=${encodeURIComponent(q)}`);
+                const res = await apiFetch(`/author_books?author_id=${id}&author_name=${encodeURIComponent(name)}&query=${encodeURIComponent(q)}`);
                 const data = await res.json();
                 
                 currentAuthor = data.author; currentBooks = data.books;
@@ -197,7 +210,7 @@
             document.getElementById('log').innerHTML = "Initializing job...\n";
             logIndex = 0;
 
-            const res = await fetch('/start_job', { method: 'POST', headers: {'Content-Type':'application/json'}, 
+            const res = await apiFetch('/start_job', { method: 'POST', headers: {'Content-Type':'application/json'},
                 body: JSON.stringify({
                     author: currentAuthor, 
                     books: idxs.map(i => currentBooks[i]), 
@@ -214,7 +227,7 @@
 
         async function stopJob() {
             if(!currentJobId) return;
-            await fetch(`/stop_job/${currentJobId}`, { method: 'POST' });
+            await apiFetch(`/stop_job/${currentJobId}`, { method: 'POST' });
         }
 
         function connect(job_id) {
