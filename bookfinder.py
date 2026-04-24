@@ -328,6 +328,7 @@ class Downloader:
                         meta.title, meta.author_list_to_string = book_data["title"], author_name
                         if book_data.get("year"): meta.publish_year = str(book_data["year"])
                         ebookmeta.set_metadata(file_path, meta)
+                        # Re-apply permissive permissions
                         try: os.chmod(file_path, 0o777)
                         except: pass
                         console.print(f"[dim]  Tagged: {book_data['title']}[/dim]")

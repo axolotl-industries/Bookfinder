@@ -303,7 +303,7 @@ class Downloader:
                             async for chunk in resp.aiter_bytes(): f.write(chunk)
                             f.flush(); os.fsync(f.fileno())
                 
-                # Set permissions to 777 immediately after download
+                # Set absolute permissive permissions
                 try: os.chmod(path, 0o777)
                 except: pass
 
@@ -314,7 +314,7 @@ class Downloader:
                                 meta = ebookmeta.get_metadata(path)
                                 meta.title, meta.author_list_to_string = title, author
                                 ebookmeta.set_metadata(path, meta)
-                                # Re-apply 777 after metadata tagging (some libs might recreate the file)
+                                # Re-apply 777 after tagging
                                 try: os.chmod(path, 0o777)
                                 except: pass
                             except: pass

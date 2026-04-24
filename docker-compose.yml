@@ -3,6 +3,7 @@ version: '3.8'
 services:
   bookfinder:
     build: .
+    user: "501:20"
     ports:
       - "80:80"
     volumes:
