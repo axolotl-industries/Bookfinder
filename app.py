@@ -171,17 +171,16 @@ async def run_background_download(job_id, data):
     await scraper.start()
     try:
         for b in data['books']:
-            log(f"PROCESSING: {b['title']}")
+            log(f"Searching for '{b['title']}'...")
             before = _library_epubs()
 
-            # 1. Usenet — walk through candidates until one actually lands an EPUB.
+            # 1. Usenet
             if os.getenv('PROWLARR_URL') and os.getenv('PROWLARR_KEY'):
                 nzbs = await usenet.search(data['author'], b['title'])
                 for nzb in nzbs[:MAX_USENET_TRIES]:
                     nzo_id = await sab.add_url(nzb['link'], f"{data['author']} - {b['title']}")
                     if not nzo_id:
                         continue
-                    log("Waiting for SABnzbd...")
                     while True:
                         status = await sab.check_status(nzo_id)
                         if status in ("completed", "failed", "unknown"):
@@ -190,9 +189,8 @@ async def run_background_download(job_id, data):
                     flatten_downloads(DOWNLOAD_DIR, log)
                     if _library_epubs() - before:
                         break
-                    log(f"No EPUB from '{nzb['title'][:60]}'; trying next candidate")
 
-            # 2. Mirrors — only if Usenet didn't deliver.
+            # 2. Mirrors
             if not (_library_epubs() - before):
                 mirrors = await scraper.get_mirrors(data['author'], b['title'], b['isbns'])
                 for name, url in mirrors:
@@ -201,7 +199,7 @@ async def run_background_download(job_id, data):
 
             new_epubs = _library_epubs() - before
             if new_epubs:
-                log(f"SUCCESS: {b['title']} -> {', '.join(sorted(new_epubs))}")
+                log(f"SUCCESS: {b['title']}")
             else:
                 log(f"FAILED: {b['title']}")
     except asyncio.CancelledError:

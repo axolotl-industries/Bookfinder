@@ -132,9 +132,8 @@ class NewznabScraper:
 
     async def search(self, author: str, title: str) -> List[Dict]:
         if not self.api_url or not self.api_key:
-            self.log("Usenet search skipped: API URL or Key not configured.")
             return []
-        self.log(f"Searching Usenet (Prowlarr) for '{author} {title}'...")
+        self.log(f"Searching Usenet for '{title}'...")
 
         url = f"{self.api_url}/api"
         # Newznab standard is an unquoted, space-separated query. Literal quotes around the phrase
@@ -173,7 +172,6 @@ class NewznabScraper:
                     return []
 
                 items = self._parse(body, ctype)
-                self.log(f"Usenet parse found {len(items)} items")
                 return self._match(items, author, title)
         except asyncio.CancelledError:
             raise
@@ -293,10 +291,8 @@ class NewznabScraper:
             link = item.get("enclosure") or item.get("link") or ""
             link = link.replace("&amp;", "&")
             if link:
-                self.log(f"Found Usenet match: {res_title[:50]}... ({_fmt_size(size)})")
+                self.log(f"Found match: {res_title[:50]}...")
                 results.append({"title": res_title, "link": link, "size": size})
-        if skipped["format"] or skipped["size"]:
-            self.log(f"Usenet skipped {skipped['format']} non-EPUB / {skipped['size']} oversized matches")
         return results
 
     @classmethod
@@ -392,9 +388,8 @@ class SabnzbdClient:
                 data = resp.json()
                 if data.get("status") and data.get("nzo_ids"):
                     nzo_id = data["nzo_ids"][0]
-                    self.log(f"Sent to SABnzbd. ID: {nzo_id}")
+                    self.log(f"Added to download queue.")
                     return nzo_id
-                self.log(f"SABnzbd add failed: {data}")
         except asyncio.CancelledError: raise
         except Exception as e:
             self.log(f"SABnzbd error: {e}")
@@ -470,7 +465,7 @@ class WikidataBibliography:
         if not author_id:
             return []
 
-        self.log(f"Fetching authoritative bibliography from Wikidata for {author_name} ({author_id})...")
+        self.log(f"Fetching bibliography for {author_name}...")
 
         # Must be a literary work (Q7725634) or instance of book (Q571) or novel (Q8242)
         query = f"""
@@ -570,7 +565,19 @@ class MetadataFetcher:
             response = await self.client.get(f"https://openlibrary.org/search/authors.json", params={"q": clean_name})
             docs = response.json().get("docs", [])
             if not docs: return []
-            candidates = sorted(docs[:10], key=lambda x: x.get("work_count", 0), reverse=True)[:5]
+            
+            # Deduplicate by normalized name while preferring the most 'complete' records
+            seen_names = {}
+            for doc in docs[:15]:
+                author_name = doc.get("name")
+                if not author_name: continue
+                norm_name = normalize_text(author_name)
+                
+                # Keep the entry with the highest work count or one that has more info
+                if norm_name not in seen_names or doc.get("work_count", 0) > seen_names[norm_name].get("work_count", 0):
+                    seen_names[norm_name] = doc
+
+            candidates = sorted(seen_names.values(), key=lambda x: x.get("work_count", 0), reverse=True)[:5]
             detailed_results = []
             for doc in candidates:
                 key = doc["key"]
@@ -678,7 +685,7 @@ class ScraperEngine:
         queries.append(f"{author} {clean_t}")
         try:
             for q in queries:
-                self.log(f"Searching Libgen for '{q}'...")
+                self.log(f"Checking mirrors for '{title}'...")
                 try:
                     await page.goto(f"https://libgen.li/index.php?req={quote(q)}&res=25&filesuns=all", timeout=30000)
                     soup = BeautifulSoup(await page.content(), 'html.parser')
@@ -691,12 +698,11 @@ class ScraperEngine:
                             ads = cols[-1].find('a', href=re.compile(r"ads\.php"))
                             if ads:
                                 direct = await self._resolve_mirror(urljoin("https://libgen.li", ads['href']), page)
-                                if direct: self.log(f"Found Libgen match: {raw_t[:40]}..."); mirrors.append(("Libgen", direct)); break
+                                if direct: self.log(f"Found mirror match..."); mirrors.append(("Libgen", direct)); break
                     if mirrors: break
                 except asyncio.CancelledError: raise
-                except Exception as e: self.log(f"Libgen error: {e}")
+                except: pass
 
-                self.log(f"Searching Anna's for '{q}'...")
                 try:
                     await page.goto(f"{self.annas_base}/search?q={quote(q)}&ext=epub&lang=en", timeout=30000)
                     results = BeautifulSoup(await page.content(), 'html.parser').select('a[href*="/md5/"]')
@@ -708,13 +714,13 @@ class ScraperEngine:
                             lg = msoup.find('a', href=re.compile(r"libgen\.li/ads\.php"))
                             if lg:
                                 direct = await self._resolve_mirror(lg['href'], page)
-                                if direct: self.log(f"Found Anna match: {cand_t[:30]}..."); mirrors.append(("Anna Libgen", direct))
+                                if direct: self.log(f"Found mirror match..."); mirrors.append(("Anna Libgen", direct))
                             ipfs = msoup.find('a', href=re.compile(r"ipfs"))
                             if ipfs and 'ipfs://' in ipfs['href']: mirrors.append(("IPFS", f"https://ipfs.io/ipfs/{ipfs['href'].split('ipfs://')[1]}"))
                             if len(mirrors) >= 3: break
                     if mirrors: break
                 except asyncio.CancelledError: raise
-                except Exception as e: self.log(f"Anna error: {e}")
+                except: pass
         finally: await page.close()
         return mirrors
 
