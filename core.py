@@ -48,17 +48,6 @@ async def resolve_annas_domain(log_func: Callable) -> str:
         except: continue
     return "https://annas-archive.gl"
 
-def redact_url(url: str) -> str:
-    """Strip secrets from a URL before logging. Handles both raw and percent-encoded forms."""
-    # apikey=... and its percent-encoded variant apikey%3D...
-    url = re.sub(r'(apikey)(=|%3D)[^&%]+', r'\1\2***', url, flags=re.I)
-    # Cloudflare Access wraps the original URL inside redirect_url= and a base64 JWT in meta=.
-    # Both can leak the apikey, so blank them entirely.
-    url = re.sub(r'(redirect_url)(=|%3D)[^&]+', r'\1\2***', url, flags=re.I)
-    url = re.sub(r'(\?|&)meta=[^&]+', r'\1meta=***', url, flags=re.I)
-    return url
-
-
 class NewznabScraper:
     def __init__(self, api_url: str, api_key: str, log_func: Callable):
         # Normalise to the indexer root. Strip query string, trailing slashes, and a trailing /api.
@@ -95,37 +84,20 @@ class NewznabScraper:
             async with httpx.AsyncClient(timeout=15.0, verify=False, follow_redirects=True, headers=headers) as client:
                 resp = await client.get(url, params=params)
 
-                ctype = resp.headers.get("Content-Type", "").lower()
-                self.log(f"Usenet request: {redact_url(str(resp.request.url))}")
-                if resp.history:
-                    self.log(f"Followed {len(resp.history)} redirect(s); final URL: {redact_url(str(resp.url))}")
-                    for h in resp.history:
-                        self.log(f"  {h.status_code} -> {redact_url(h.headers.get('location', '?'))}")
-                self.log(f"Usenet response: status={resp.status_code} content-type='{ctype}' bytes={len(resp.content)}")
-
                 if resp.status_code != 200:
                     self.log(f"Usenet API error: HTTP {resp.status_code}")
-                    self.log(f"Body (first 500 chars): {resp.text[:500]}")
                     return []
 
+                ctype = resp.headers.get("Content-Type", "").lower()
                 body = resp.text
                 stripped = body.lstrip()
-                looks_html = "text/html" in ctype or stripped[:15].lower().startswith(("<!doctype", "<html"))
-
-                if looks_html:
-                    self.log("ERROR: Prowlarr returned HTML instead of an RSS/XML or JSON feed.")
-                    self.log("  Most common cause: an auth gateway in front of Prowlarr (Cloudflare Access,")
-                    self.log("  Authelia, nginx basic-auth, etc.) is intercepting the request. Your browser")
-                    self.log("  works because it holds a session cookie; this container does not.")
-                    self.log("  Fix: point the URL at Prowlarr directly on the LAN / docker network instead of")
-                    self.log("  the public gateway hostname. Also double-check the URL shape is")
-                    self.log("  http://<host>:<port>/<indexer-id> and the apikey is correct.")
-                    self.log(f"  Body (first 200 chars): {body[:200]}")
+                if "text/html" in ctype or stripped[:15].lower().startswith(("<!doctype", "<html")):
+                    self.log("Usenet error: Prowlarr returned HTML. Check the URL points at the indexer root "
+                             "(http://<host>:<port>/<indexer-id>) and isn't going through an auth gateway.")
                     return []
 
                 items = self._parse(body, ctype)
                 self.log(f"Usenet parse found {len(items)} items")
-
                 return self._match(items, author, title)
         except asyncio.CancelledError:
             raise
@@ -266,6 +238,51 @@ class SabnzbdClient:
             self.log(f"SABnzbd status check error: {e}")
         return "unknown"
 
+# --- Bibliography filter constants ---
+
+_FICTION_SUBJECTS = (
+    "fiction", "novel", "novels", "novella",
+    "short stories", "short story", "stories",
+    "science fiction", "fantasy fiction", "fantasy",
+    "speculative fiction", "cyberpunk",
+    "horror", "mystery", "thriller",
+    "american fiction", "english fiction", "literature",
+)
+
+_NON_FICTION_SUBJECTS = (
+    "non-fiction", "nonfiction", "biography", "autobiography", "memoir",
+    "history", "criticism", "manual", "textbook", "reference",
+    "bibliography", "cookbook", "calendar",
+    "comics", "graphic novels", "manga",
+    "juvenile", "children",
+    "puzzle", "brainteaser", "activities", "crafts",
+    "art", "photography", "study guide",
+    "anthology", "anthologies",
+)
+
+_CRUFT_TITLE_RE = re.compile(
+    r"\b(box set|trilogy|omnibus|selections|summary|analysis of|study guide|"
+    r"companion|trivia|unofficial|vol\.?\s*\d+|volume\s*\d+|issue|magazine|"
+    r"year['’]?s best|antholog|notebook|diary|journal|calendar|catalog|"
+    r"textbook|puzzle|brainteaser|crafts?)\b",
+    re.I,
+)
+
+# Non-English articles that start translated titles (kept to unambiguously-foreign cases).
+_NON_ENG_ARTICLE_RE = re.compile(
+    r"^(una?|unos|unas|el|los|las|"
+    r"le|les|du|"
+    r"der|die|das|ein|eine|einen|dem|den|"
+    r"het|een|"
+    r"il|lo|gli|"
+    r"um|uma|os)\s+",
+    re.I,
+)
+
+# Scripts that unambiguously aren't English (Cyrillic, CJK, Hiragana/Katakana, Arabic, Hebrew).
+_NON_LATIN_RE = re.compile(r"[Ѐ-ӿ一-鿿぀-ヿ؀-ۿ֐-׿]")
+
+
 class MetadataFetcher:
     def __init__(self):
         self.client = httpx.Client(timeout=20.0, verify=False, headers={"User-Agent": UA})
@@ -294,31 +311,81 @@ class MetadataFetcher:
         except: return []
 
     def get_author_books(self, author_id: str, query: Optional[str] = None) -> List[Dict]:
-        books, seen, page = [], set(), 1
-        CRUFT = [r"\bbox set\b", r"\btrilogy\b", r"\bomnibus\b", r"\bselections\b", r"\bsummary\b", r"\banalysis\b", r"\bstudy guide\b", r"\bcompanion\b", r"\btrivia\b", r"\bunofficial\b", r"\bnotebook\b", r"\bdiary\b", r"\bjournal\b", r"\bcalendar\b", r"\bcatalog\b", r"\bbin\b", r"\bpack\b", r"\bx\d+\b", r"\bd/b\b", r"\bÚ10\b", r"\bvol\.\s*\d+\b", r"\bvolume\s*\d+\b", r"\bissue\b", r"\bmagazine\b", r"\breader\b", r"\bcollege\b", r"\bcourse\b", r"\btextbook\b", r"\bcookbook\b", r"\bkitchen\b", r"\bcomic\b", r"\bgraphic novel\b", r"\bmanga\b", r"\bedited by\b", r"\bvarious authors\b", r"\[\d+/\d+\]", r"\(part \d+\)", r"\bthe best (american|british|science|horror|mystery|sports)\b", r" / ", r" & ", r" ; "]
+        """Return the author's novels and short story collections, English only.
+
+        Uses the work-level /authors/{id}/works.json endpoint (one entry per canonical work),
+        not the edition-level /search.json (which multiplies into every translation and reprint).
+        """
+        books: List[Dict] = []
+        seen = set()
+        key = author_id.split('/')[-1]  # accept either "OL123A" or "/authors/OL123A"
+        offset, limit = 0, 200
+
         while True:
             try:
-                resp = self.client.get("https://openlibrary.org/search.json", params={"author": author_id, "language": "eng", "fields": "title,isbn,first_publish_year,subject", "page": page})
-                docs = resp.json().get("docs", [])
-                if not docs: break
-                for doc in docs:
-                    title = doc.get("title", "")
-                    if not title or any(re.search(p, title.lower()) for p in CRUFT): continue
-                    subjects = [s.lower() for s in doc.get("subject", [])]
-                    NON_WANTED = ["history", "criticism", "manual", "biography", "non-fiction", "nonfiction", "bibliography", "cookbook", "calendar", "comics", "graphic novels", "periodicals", "study guide"]
-                    WANTED_GENRES = ["fiction", "short stories", "novel", "literature", "science fiction", "fantasy", "speculative fiction", "cyberpunk", "horror", "mystery", "thriller"]
-                    if subjects:
-                        if any(term in s for term in NON_WANTED for s in subjects) and not any(term in s for term in WANTED_GENRES for s in subjects): continue
-                    if subjects and not any(term in s for term in WANTED_GENRES for s in subjects): continue
-                    norm = normalize_text(title)
-                    if not norm or (query and normalize_text(query) not in norm): continue
-                    if norm not in seen:
-                        books.append({"title": title, "isbns": [i for i in doc.get("isbn", []) if len(i) in [10, 13]], "year": doc.get("first_publish_year")})
-                        seen.add(norm)
-                if len(docs) < 100: break
-                page += 1
-            except: break
-        return sorted(books, key=lambda x: (x.get("year") or 0))
+                resp = self.client.get(
+                    f"https://openlibrary.org/authors/{key}/works.json",
+                    params={"limit": limit, "offset": offset},
+                )
+                if resp.status_code != 200:
+                    break
+                entries = resp.json().get("entries") or []
+            except Exception:
+                break
+            if not entries:
+                break
+
+            for work in entries:
+                title = (work.get("title") or "").strip()
+                if not title or _CRUFT_TITLE_RE.search(title):
+                    continue
+                if not self._is_english_title(title):
+                    continue
+                subjects = [str(s).lower() for s in (work.get("subjects") or [])]
+                if not self._is_fiction_work(subjects):
+                    continue
+
+                norm = normalize_text(title)
+                if not norm or norm in seen:
+                    continue
+                if query and normalize_text(query) not in norm:
+                    continue
+                seen.add(norm)
+
+                books.append({
+                    "title": title,
+                    "year": self._extract_year(work.get("first_publish_date")),
+                    "isbns": [],  # ISBNs live on editions; the downloader falls back to author+title.
+                })
+
+            if len(entries) < limit:
+                break
+            offset += limit
+
+        return sorted(books, key=lambda x: (x.get("year") or 9999, x.get("title", "")))
+
+    @staticmethod
+    def _is_fiction_work(subjects: List[str]) -> bool:
+        if not subjects:
+            return False
+        has_fiction = any(w in s for s in subjects for w in _FICTION_SUBJECTS)
+        has_non_fiction = any(w in s for s in subjects for w in _NON_FICTION_SUBJECTS)
+        return has_fiction and not has_non_fiction
+
+    @staticmethod
+    def _is_english_title(title: str) -> bool:
+        if _NON_LATIN_RE.search(title):
+            return False
+        if _NON_ENG_ARTICLE_RE.search(title):
+            return False
+        return True
+
+    @staticmethod
+    def _extract_year(date_value) -> Optional[int]:
+        if not date_value:
+            return None
+        m = re.search(r'\b(1[89]\d{2}|20\d{2})\b', str(date_value))
+        return int(m.group()) if m else None
 
 class ScraperEngine:
     def __init__(self, log_func: Callable):
