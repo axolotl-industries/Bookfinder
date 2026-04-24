@@ -1,11 +1,13 @@
 import os
 import re
+import json
 import asyncio
 import httpx
 import ssl
 import ebookmeta
 import zipfile
 import sys
+import xml.etree.ElementTree as ET
 from typing import List, Dict, Optional, Tuple, Generator, Callable
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, Browser
@@ -48,113 +50,160 @@ async def resolve_annas_domain(log_func: Callable) -> str:
 
 class NewznabScraper:
     def __init__(self, api_url: str, api_key: str, log_func: Callable):
-        # Clean URL: strip trailing slashes and common API suffixes to ensure we control the endpoint
+        # Normalise to the indexer root. Strip query string, trailing slashes, and a trailing /api.
         base = api_url.strip().split('?')[0].rstrip('/')
-        if base.endswith('/api'): base = base[:-4]
+        if base.endswith('/api'):
+            base = base[:-4]
         self.api_url = base
         self.api_key = api_key.strip()
         self.log = log_func
 
     async def search(self, author: str, title: str) -> List[Dict]:
-        if not self.api_url or not self.api_key: return []
+        if not self.api_url or not self.api_key:
+            return []
         self.log(f"Searching Usenet for '{author} {title}'...")
-        
-        # Try specific book categories first
+
+        url = f"{self.api_url}/api"
+        # Newznab standard is an unquoted, space-separated query. Literal quotes around the phrase
+        # cause many indexers (incl. most of Prowlarr's passthroughs) to treat it as an exact match
+        # and return nothing — or to respond with an error page.
         params = {
             "t": "search",
             "cat": "7000,7020,8010",
             "q": f"{author} {title}",
             "apikey": self.api_key,
-            "o": "json"
         }
-        
-        url = f"{self.api_url}/api"
-        # Explicitly quote the query for indexer compatibility
-        params["q"] = f'"{author} {title}"'
-        
+        headers = {
+            "User-Agent": UA,
+            # Be explicit about what we expect. Some reverse proxies in front of Prowlarr fall back
+            # to HTML (login / error pages) when Accept is */* — being explicit avoids that.
+            "Accept": "application/rss+xml, application/xml, text/xml, application/json;q=0.9, */*;q=0.1",
+        }
+
         try:
-            async with httpx.AsyncClient(timeout=15.0, verify=False, follow_redirects=True, headers={"User-Agent": UA}) as client:
+            async with httpx.AsyncClient(timeout=15.0, verify=False, follow_redirects=True, headers=headers) as client:
                 resp = await client.get(url, params=params)
-                self.log(f"DEBUG RESPONSE (First 1000 chars): {resp.text[:1000]}")
-                
+
+                ctype = resp.headers.get("Content-Type", "").lower()
+                sent_url = str(resp.request.url)
+                # Redact apikey in logged URLs so it doesn't leak into shared logs.
+                safe_sent = re.sub(r'(apikey=)[^&]+', r'\1***', sent_url)
+                safe_final = re.sub(r'(apikey=)[^&]+', r'\1***', str(resp.url))
+
+                self.log(f"Usenet request: {safe_sent}")
+                if resp.history:
+                    self.log(f"Followed {len(resp.history)} redirect(s); final URL: {safe_final}")
+                    for h in resp.history:
+                        self.log(f"  {h.status_code} -> {h.headers.get('location', '?')}")
+                self.log(f"Usenet response: status={resp.status_code} content-type='{ctype}' bytes={len(resp.content)}")
+
                 if resp.status_code != 200:
-                    self.log(f"Usenet API error: {resp.status_code}")
+                    self.log(f"Usenet API error: HTTP {resp.status_code}")
+                    self.log(f"Body (first 500 chars): {resp.text[:500]}")
                     return []
-                
-                items = []
-                # Try JSON first
-                try:
-                    data = resp.json()
-                    raw_items = data.get("item", [])
-                    if not raw_items and "channel" in data:
-                        raw_items = data.get("channel", {}).get("item", [])
-                    if not isinstance(raw_items, list): raw_items = [raw_items] if raw_items else []
-                    
-                    for item in raw_items:
-                        items.append({
-                            "title": item.get("title", ""),
-                            "link": item.get("link", ""),
-                            "enclosure": item.get("enclosure")
-                        })
-                except Exception:
-                    self.log("Usenet returned non-JSON or malformed JSON, attempting robust XML/Regex parse...")
-                    # Regex-based extraction is often more reliable for varied RSS formats
-                    titles = re.findall(r'<title>(.*?)</title>', resp.text, re.I | re.S)
-                    links = re.findall(r'<link>(.*?)</link>', resp.text, re.I | re.S)
-                    enclosures = re.findall(r'<enclosure[^>]+url=["\'](.*?)["\']', resp.text, re.I | re.S)
-                    
-                    # Newznab often has the first title/link as the channel info
-                    if len(titles) > 1:
-                        # Find all <item> blocks to be more precise
-                        item_blocks = re.findall(r'<item>(.*?)</item>', resp.text, re.I | re.S)
-                        for block in item_blocks:
-                            i_title = re.search(r'<title>(.*?)</title>', block, re.I | re.S)
-                            i_link = re.search(r'<link>(.*?)</link>', block, re.I | re.S)
-                            i_enc = re.search(r'<enclosure[^>]+url=["\'](.*?)["\']', block, re.I | re.S)
-                            
-                            items.append({
-                                "title": i_title.group(1).strip() if i_title else "",
-                                "link": i_link.group(1).strip() if i_link else "",
-                                "enclosure": {"@url": i_enc.group(1).strip()} if i_enc else None
-                            })
-                
+
+                body = resp.text
+                stripped = body.lstrip()
+                looks_html = "text/html" in ctype or stripped[:15].lower().startswith(("<!doctype", "<html"))
+
+                if looks_html:
+                    self.log("ERROR: Prowlarr returned HTML instead of an RSS/XML or JSON feed.")
+                    self.log("  Likely causes, in order of likelihood:")
+                    self.log("   1. A reverse proxy / auth gateway in front of Prowlarr is intercepting the request.")
+                    self.log("      If Prowlarr sits behind e.g. Authelia / nginx basic-auth, this container has no session cookie.")
+                    self.log("   2. The Newznab URL is wrong. It should point to the indexer root, not the Prowlarr UI.")
+                    self.log("      Correct form: http://<host>:9696/<indexer-id>  (the /api suffix is appended automatically)")
+                    self.log("   3. Prowlarr's 'Authentication Required' is set to 'Enabled' and the apikey is being rejected.")
+                    self.log(f"  Body (first 500 chars): {body[:500]}")
+                    return []
+
+                items = self._parse(body, ctype)
                 self.log(f"Usenet parse found {len(items)} items")
 
-                results = []
-                norm_title = normalize_text(title)
-                author_parts = [p.lower() for p in normalize_text(author).split() if len(p) > 2]
-
-                for item in items:
-                    res_title = item.get("title", "")
-                    # Clean XML CDATA or entities if present
-                    res_title = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', res_title)
-                    norm_res_title = normalize_text(res_title)
-                    
-                    # Validation: title must match, and at least one author part must be present
-                    title_match = norm_title in norm_res_title
-                    author_match = any(p in norm_res_title for p in author_parts) if author_parts else True
-                    
-                    if title_match and author_match:
-                        # Extract link (prefer enclosure, fallback to link)
-                        link = item.get("link", "")
-                        if isinstance(item.get("enclosure"), dict):
-                            link = item["enclosure"].get("@url", link)
-                        elif isinstance(item.get("enclosure"), list) and item["enclosure"]:
-                            for e in item["enclosure"]:
-                                if isinstance(e, dict) and e.get("@url"):
-                                    link = e["@url"]; break
-
-                        if link:
-                            # Clean XML entities in link
-                            link = link.replace("&amp;", "&")
-                            self.log(f"Found Usenet match: {res_title[:50]}...")
-                            results.append({"title": res_title, "link": link})
-                
-                return results
-        except asyncio.CancelledError: raise
+                return self._match(items, author, title)
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             self.log(f"Usenet search error: {e}")
             return []
+
+    def _parse(self, body: str, ctype: str) -> List[Dict]:
+        # Prefer the parser that matches the content type, fall back to the other.
+        if "json" in ctype:
+            items = self._parse_json(body)
+            return items if items else self._parse_xml(body)
+        items = self._parse_xml(body)
+        return items if items else self._parse_json(body)
+
+    def _parse_xml(self, body: str) -> List[Dict]:
+        items: List[Dict] = []
+        try:
+            # Drop the default xmlns so ET.find('item') works without namespace gymnastics.
+            cleaned = re.sub(r'\sxmlns="[^"]+"', '', body, count=1)
+            root = ET.fromstring(cleaned)
+            # Newznab errors look like <error code="100" description="..." />
+            if root.tag.lower() == 'error':
+                self.log(f"Newznab error response: code={root.attrib.get('code')} desc={root.attrib.get('description')}")
+                return []
+            for item in root.iter('item'):
+                t = item.findtext('title', default='') or ''
+                l = item.findtext('link', default='') or ''
+                enc = item.find('enclosure')
+                enc_url = enc.attrib.get('url') if enc is not None else None
+                items.append({"title": t.strip(), "link": l.strip(), "enclosure": enc_url})
+        except ET.ParseError as e:
+            self.log(f"XML parse error: {e}; falling back to regex extraction")
+            for block in re.findall(r'<item[^>]*>(.*?)</item>', body, re.I | re.S):
+                t = re.search(r'<title[^>]*>\s*(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?\s*</title>', block, re.I | re.S)
+                l = re.search(r'<link[^>]*>\s*(.*?)\s*</link>', block, re.I | re.S)
+                e_url = re.search(r'<enclosure[^>]+url=["\'](.*?)["\']', block, re.I | re.S)
+                items.append({
+                    "title": (t.group(1).strip() if t else ''),
+                    "link": (l.group(1).strip() if l else ''),
+                    "enclosure": (e_url.group(1).strip() if e_url else None),
+                })
+        return items
+
+    def _parse_json(self, body: str) -> List[Dict]:
+        try:
+            data = json.loads(body)
+        except Exception:
+            return []
+        raw = data.get("item") or data.get("channel", {}).get("item", [])
+        if not isinstance(raw, list):
+            raw = [raw] if raw else []
+        items: List[Dict] = []
+        for i in raw:
+            enc = i.get("enclosure")
+            enc_url = None
+            if isinstance(enc, dict):
+                enc_url = enc.get("@url") or enc.get("url")
+            elif isinstance(enc, list):
+                for e in enc:
+                    if isinstance(e, dict):
+                        enc_url = e.get("@url") or e.get("url")
+                        if enc_url:
+                            break
+            items.append({"title": i.get("title", ""), "link": i.get("link", ""), "enclosure": enc_url})
+        return items
+
+    def _match(self, items: List[Dict], author: str, title: str) -> List[Dict]:
+        results = []
+        norm_title = normalize_text(title)
+        author_parts = [p for p in normalize_text(author).split() if len(p) > 2]
+        for item in items:
+            res_title = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', item.get("title", ""))
+            norm_res_title = normalize_text(res_title)
+            title_match = norm_title in norm_res_title
+            author_match = any(p in norm_res_title for p in author_parts) if author_parts else True
+            if not (title_match and author_match):
+                continue
+            link = item.get("enclosure") or item.get("link") or ""
+            link = link.replace("&amp;", "&")
+            if link:
+                self.log(f"Found Usenet match: {res_title[:50]}...")
+                results.append({"title": res_title, "link": link})
+        return results
 
 class SabnzbdClient:
     def __init__(self, url: str, api_key: str, log_func: Callable):
