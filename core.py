@@ -296,7 +296,8 @@ class ScraperEngine:
         page = await self.browser.new_page()
         norm_title, author_parts = normalize_text(title), [p for p in normalize_text(author).split() if len(p) > 2]
         queries = [isbns[0]] if isbns else []
-        queries.append(f"{author} {re.sub(r'^the\s+|^a\s+|^an\s+', '', title.lower())}")
+        clean_t = re.sub(r'^the\s+|^a\s+|^an\s+', '', title.lower())
+        queries.append(f"{author} {clean_t}")
         try:
             for q in queries:
                 self.log(f"Searching Libgen for '{q}'...")
