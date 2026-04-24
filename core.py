@@ -96,18 +96,11 @@ def create_robust_ssl_context():
 
 async def resolve_annas_domain(log_func: Callable) -> str:
     mirrors = ["https://annas-archive.se", "https://annas-archive.li", "https://annas-archive.gs"]
-    log_func("Resolving mirror...")
     for m in mirrors:
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                log_func(f"Checking {m}...")
-                if (await client.head(m)).status_code < 400:
-                    log_func(f"Using mirror: {m}")
-                    return m
-        except Exception as e:
-            log_func(f"Mirror {m} failed: {e}")
-            continue
-    log_func("All mirrors failed; using fallback https://annas-archive.gl")
+                if (await client.head(m)).status_code < 400: return m
+        except: continue
     return "https://annas-archive.gl"
 
 MAX_EPUB_BYTES = 50 * 1024 * 1024  # 50MB — EPUBs are small; anything bigger is a movie/audiobook/rar pack.
@@ -765,13 +758,9 @@ class ScraperEngine:
         self.client = httpx.AsyncClient(verify=False, timeout=20.0, follow_redirects=True, headers={"User-Agent": UA})
 
     async def start(self):
-        self.log("Initializing ScraperEngine...")
         self.annas_base = await resolve_annas_domain(self.log)
-        self.log("Starting Playwright...")
         self.playwright = await async_playwright().start()
-        self.log("Launching Browser...")
-        self.browser = await self.playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"])
-        self.log("ScraperEngine ready.")
+        self.browser = await self.playwright.chromium.launch(headless=True)
 
     async def stop(self):
         try:

@@ -212,12 +212,8 @@
 
             const res = await apiFetch('/start_job', { method: 'POST', headers: {'Content-Type':'application/json'},
                 body: JSON.stringify({
-                    author: currentAuthor, 
-                    books: idxs.map(i => currentBooks[i]), 
-                    usenet_url: localStorage.getItem('usenet_url'),
-                    usenet_key: localStorage.getItem('usenet_key'),
-                    sab_url: localStorage.getItem('sab_url'),
-                    sab_key: localStorage.getItem('sab_key')
+                    author: currentAuthor,
+                    books: idxs.map(i => currentBooks[i])
                 })
             });
             const { job_id } = await res.json();
@@ -231,31 +227,14 @@
         }
 
         function connect(job_id) {
-            console.log(`Connecting to stream for job ${job_id}...`);
             const ev = new EventSource(`/stream/${job_id}?last_idx=${logIndex}`);
             const logDiv = document.getElementById('log');
-
-            ev.onopen = () => {
-                console.log("Stream connected.");
-                const line = document.createElement('div');
-                line.textContent = "--- Stream connected ---";
-                line.style.color = "#8e8e93";
-                line.style.fontSize = "12px";
-                logDiv.appendChild(line);
-            };
-
             ev.onmessage = (e) => {
                 const line = document.createElement('div');
-                const msg = e.data; 
-                if (msg === ": heartbeat") return;
-                line.textContent = msg;
+                const msg = e.data; line.textContent = msg;
                 if(msg.startsWith("SUCCESS:")) line.style.color = "#34c759";
                 if(msg.startsWith("FAILED:") || msg === "JOB_CANCELLED_BY_USER") line.style.color = "#ff453a";
-                if(msg.startsWith("PROCESSING:") || msg.startsWith("Starting") || msg.startsWith("Setting up") || msg.startsWith("Initializing")) { 
-                    line.style.color = "#0a84ff"; 
-                    line.style.marginTop = "10px"; 
-                    line.style.fontWeight = "bold"; 
-                }
+                if(msg.startsWith("PROCESSING:")) { line.style.color = "#0a84ff"; line.style.marginTop = "10px"; line.style.fontWeight = "bold"; }
                 logDiv.appendChild(line); logDiv.scrollTop = logDiv.scrollHeight;
                 logIndex++;
                 if(msg === "JOB_COMPLETE") {
@@ -265,18 +244,8 @@
                     currentJobId = null;
                 }
             };
-            ev.onerror = (err) => { 
-                console.error("Stream error:", err);
-                const line = document.createElement('div');
-                line.textContent = "--- Stream connection lost, retrying... ---";
-                line.style.color = "#ff453a";
-                line.style.fontSize = "12px";
-                logDiv.appendChild(line);
-                ev.close(); 
-                setTimeout(() => connect(job_id), 2000); 
-            };
+            ev.onerror = () => { ev.close(); setTimeout(() => connect(job_id), 2000); };
         }
-
     </script>
 </body>
 </html>

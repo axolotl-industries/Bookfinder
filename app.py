@@ -163,26 +163,19 @@ def _library_epubs() -> set:
 async def run_background_download(job_id, data):
     def log(m): JOBS.add_log(job_id, m)
 
-    log("Starting job execution...")
-    try:
-        usenet = NewznabScraper(data.get('usenet_url'), data.get('usenet_key'), log)
-        sab = SabnzbdClient(data.get('sab_url'), data.get('sab_key'), log)
-        scraper = ScraperEngine(log)
-        downloader = Downloader(DOWNLOAD_DIR, log)
+    usenet = NewznabScraper(os.getenv('PROWLARR_URL'), os.getenv('PROWLARR_KEY'), log)
+    sab = SabnzbdClient(os.getenv('SABNZBD_URL'), os.getenv('SABNZBD_KEY'), log)
+    scraper = ScraperEngine(log)
+    downloader = Downloader(DOWNLOAD_DIR, log)
 
-        log("Setting up scraper engine...")
-        await scraper.start()
-    except Exception as e:
-        log(f"FAILED: Initialization error: {e}")
-        return
-
+    await scraper.start()
     try:
         for b in data['books']:
             log(f"PROCESSING: {b['title']}")
             before = _library_epubs()
 
             # 1. Usenet — walk through candidates until one actually lands an EPUB.
-            if data.get('usenet_url') and data.get('usenet_key'):
+            if os.getenv('PROWLARR_URL') and os.getenv('PROWLARR_KEY'):
                 nzbs = await usenet.search(data['author'], b['title'])
                 for nzb in nzbs[:MAX_USENET_TRIES]:
                     nzo_id = await sab.add_url(nzb['link'], f"{data['author']} - {b['title']}")
