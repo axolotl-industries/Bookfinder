@@ -303,8 +303,10 @@ class Downloader:
                             async for chunk in resp.aiter_bytes(): f.write(chunk)
                             f.flush(); os.fsync(f.fileno())
                 
-                # Set absolute permissive permissions
-                try: os.chmod(path, 0o777)
+                # Set absolute permissive permissions and ownership to nobody
+                try: 
+                    os.chmod(path, 0o777)
+                    os.chown(path, 65534, 65534)
                 except: pass
 
                 if zipfile.is_zipfile(path):
@@ -314,8 +316,10 @@ class Downloader:
                                 meta = ebookmeta.get_metadata(path)
                                 meta.title, meta.author_list_to_string = title, author
                                 ebookmeta.set_metadata(path, meta)
-                                # Re-apply 777 after tagging
-                                try: os.chmod(path, 0o777)
+                                # Re-apply 777 and nobody ownership after tagging
+                                try: 
+                                    os.chmod(path, 0o777)
+                                    os.chown(path, 65534, 65534)
                                 except: pass
                             except: pass
                             self.log(f"Saved to: {path}")

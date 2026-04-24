@@ -319,7 +319,9 @@ class Downloader:
                                     progress.update(task_id, advance=len(chunk))
                                     if downloaded_size > self.max_size_bytes: break
                 
-                try: os.chmod(file_path, 0o777)
+                try: 
+                    os.chmod(file_path, 0o777)
+                    os.chown(file_path, 65534, 65534)
                 except: pass
 
                 if self.is_valid_epub(file_path):
@@ -328,8 +330,10 @@ class Downloader:
                         meta.title, meta.author_list_to_string = book_data["title"], author_name
                         if book_data.get("year"): meta.publish_year = str(book_data["year"])
                         ebookmeta.set_metadata(file_path, meta)
-                        # Re-apply permissive permissions
-                        try: os.chmod(file_path, 0o777)
+                        # Re-apply permissive permissions and ownership
+                        try: 
+                            os.chmod(file_path, 0o777)
+                            os.chown(file_path, 65534, 65534)
                         except: pass
                         console.print(f"[dim]  Tagged: {book_data['title']}[/dim]")
                     except Exception: pass
