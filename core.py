@@ -189,52 +189,46 @@ class ScraperEngine:
                 try:
                     await page.goto(f"https://libgen.li/index.php?req={quote(q)}&res=25&filesuns=all", timeout=30000)
                     soup = BeautifulSoup(await page.content(), 'html.parser')
-                    for r in soup.find_all('tr')[1:]:
+                    # Table 1 is the results table. Its rows start from index 1.
+                    # Column layout based on inspection:
+                    # 0: Title (contains ID/Series too)
+                    # 1: Author
+                    # 2: Publisher
+                    # 3: Year
+                    # 4: Language
+                    # 5: Pages
+                    # 6: Size
+                    # 7: Extension
+                    # 8: Mirrors (links)
+                    
+                    rows = soup.select('table[id="table-libgen"] tr') or soup.find_all('tr')[1:]
+                    for r in rows:
                         cols = r.find_all('td')
-                        if len(cols) < 9: continue
+                        if len(cols) < 8: continue
                         
-                        # Libgen columns can be tricky; sometimes they merge or swap.
-                        # Let's be more robust but careful about empty strings.
-                        col_text = [normalize_text(c.get_text()) for c in cols[:4]]
-                        row_author = col_text[1] if len(col_text) > 1 else ""
-                        row_title = col_text[2] if len(col_text) > 2 else ""
-                        
-                        row_lang = cols[6].get_text().lower()
-                        row_ext = cols[8].get_text().lower()
+                        # Clean up Libgen's merged text/ID strings
+                        row_raw_title = cols[0].get_text(strip=True).lower()
+                        row_author = cols[1].get_text(strip=True).lower()
+                        row_lang = cols[4].get_text(strip=True).lower()
+                        row_ext = cols[7].get_text(strip=True).lower()
 
-                        # Extension & Language check
                         is_epub = 'epub' in row_ext
-                        is_eng = any(l in row_lang for l in ['english', 'eng']) or not row_lang.strip()
+                        is_eng = any(l in row_lang for l in ['english', 'eng', 'english']) or not row_lang.strip()
                         
-                        # Title check: row_title must contain norm_title. 
-                        # Avoid reverse check 'row_title in norm_title' to prevent empty/partial matches.
-                        title_match = len(row_title) > 2 and norm_title in row_title
+                        # Title verification: target title must appear in the title blob
+                        title_match = norm_title in normalize_text(row_raw_title)
                         
-                        # Fallback: check other columns but be strict
-                        if not title_match:
-                            for t in col_text[2:]: # Check title/publisher columns
-                                if len(t) > 2 and norm_title in t:
-                                    title_match = True
-                                    break
-
-                        # Author check: Must find at least one significant part of author name in author column
-                        author_match = False
-                        if author_parts:
-                            # Check specifically in the author column (col 1)
-                            if any(p in row_author for p in author_parts):
-                                author_match = True
-                            # Fallback: check if it's anywhere else if not in author col
-                            elif any(p in t for p in author_parts for t in col_text):
-                                author_match = True
-                        else:
-                            author_match = True
+                        # Author verification: must match one part of author name
+                        author_match = any(p in row_author for p in author_parts) if author_parts else True
 
                         if is_epub and is_eng and title_match and author_match:
-                            ads = r.find('a', href=re.compile(r"ads\.php"))
+                            # Mirrors are in the last or second to last column
+                            mirror_col = cols[-1]
+                            ads = mirror_col.find('a', href=re.compile(r"ads\.php"))
                             if ads:
                                 direct = await self._resolve_mirror(urljoin("https://libgen.li", ads['href']), page)
                                 if direct: 
-                                    self.log(f"Found Libgen match: {row_title}")
+                                    self.log(f"Found Libgen match: {row_raw_title[:40]}...")
                                     mirrors.append(("Libgen", direct))
                                     if len(mirrors) >= 2: break
                     if mirrors: break
@@ -245,23 +239,15 @@ class ScraperEngine:
                 self.log(f"Searching Anna's for '{q}'...")
                 try:
                     await page.goto(f"{self.annas_base}/search?q={quote(q)}&ext=epub&lang=en", timeout=30000)
-                    # Anna's results often have the title/author in the link text or nearby div
                     results = BeautifulSoup(await page.content(), 'html.parser').select('a[href*="/md5/"]')
                     for cand in results[:3]:
                         cand_text = normalize_text(cand.get_text())
                         
-                        # Even for ISBN searches, verify title match to avoid unrelated results
-                        title_match = (len(cand_text) > 2 and norm_title in cand_text) or (len(norm_title) > 2 and norm_title in cand_text)
+                        # Verify title AND author even for ISBN searches
+                        title_match = norm_title in cand_text
                         author_match = any(p in cand_text for p in author_parts) if author_parts else True
                         
-                        # If it's an ISBN search, we allow it if either title or author matches
-                        # If it's a title/author search, we require both.
-                        if q == (isbns[0] if isbns else None):
-                            match = title_match or author_match
-                        else:
-                            match = title_match and author_match
-
-                        if match:
+                        if title_match and author_match:
                             await page.goto(urljoin(self.annas_base, cand['href']), timeout=30000)
                             msoup = BeautifulSoup(await page.content(), 'html.parser')
                             lg = msoup.find('a', href=re.compile(r"libgen\.li/ads\.php"))

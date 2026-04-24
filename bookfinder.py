@@ -224,39 +224,25 @@ class ScraperEngine:
                 rows = BeautifulSoup(resp.text, 'html.parser').find_all('tr')[1:]
                 for row in rows:
                     cols = row.find_all('td')
-                    if len(cols) >= 9:
-                        col_text = [self.normalize_title(c.get_text()) for c in cols[:4]]
-                        row_author = col_text[1] if len(col_text) > 1 else ""
-                        row_title = col_text[2] if len(col_text) > 2 else ""
-                        
-                        row_lang = cols[6].get_text().lower()
-                        row_ext = cols[8].get_text().lower()
+                    if len(cols) < 8: continue
+                    
+                    row_raw_title = cols[0].get_text(strip=True).lower()
+                    row_author = cols[1].get_text(strip=True).lower()
+                    row_lang = cols[4].get_text(strip=True).lower()
+                    row_ext = cols[7].get_text(strip=True).lower()
 
-                        is_epub = 'epub' in row_ext
-                        is_eng = any(l in row_lang for l in ['english', 'eng']) or not row_lang.strip()
-                        
-                        # Use strictly forward-matching title check with length guard
-                        title_match = len(row_title) > 2 and norm_title in row_title
-                        if not title_match:
-                            for t in col_text[2:]:
-                                if len(t) > 2 and norm_title in t:
-                                    title_match = True
-                                    break
-                        
-                        author_match = False
-                        if author_parts:
-                            if any(p in row_author for p in author_parts):
-                                author_match = True
-                            elif any(p in t for p in author_parts for t in col_text):
-                                author_match = True
-                        else:
-                            author_match = True
+                    is_epub = 'epub' in row_ext
+                    is_eng = any(l in row_lang for l in ['english', 'eng']) or not row_lang.strip()
+                    
+                    title_match = norm_title in self.normalize_title(row_raw_title)
+                    author_match = any(p in row_author for p in author_parts) if author_parts else True
 
-                        if is_epub and is_eng and title_match and author_match:
-                            for l in cols[1].find_all('a', href=True):
-                                if 'ads.php' in l['href']:
-                                    direct = await self._resolve_libgen_ads(urljoin(LIBGEN_BASE_URL, l['href']))
-                                    if direct: yield "Libgen Direct", direct
+                    if is_epub and is_eng and title_match and author_match:
+                        mirror_col = cols[-1]
+                        for l in mirror_col.find_all('a', href=True):
+                            if 'ads.php' in l['href']:
+                                direct = await self._resolve_libgen_ads(urljoin(LIBGEN_BASE_URL, l['href']))
+                                if direct: yield "Libgen Direct", direct
         except Exception: pass
 
         # 2. Anna's Archive (Browser Fallback + Strict English)
@@ -272,14 +258,11 @@ class ScraperEngine:
                 for cand in results[:3]:
                     cand_text = self.normalize_title(cand.get_text())
                     
-                    if q == (isbns[0] if isbns else None):
-                        match = True
-                    else:
-                        title_match = norm_title in cand_text or cand_text in norm_title
-                        author_match = any(p in cand_text for p in author_parts) if author_parts else True
-                        match = title_match and author_match
+                    # Strict validation for both ISBN and text searches
+                    title_match = norm_title in cand_text
+                    author_match = any(p in cand_text for p in author_parts) if author_parts else True
 
-                    if match:
+                    if title_match and author_match:
                         await page.goto(urljoin(self.annas_base, cand['href']), timeout=25000)
                         await asyncio.sleep(2)
                         md5_soup = BeautifulSoup(await page.content(), 'html.parser')
