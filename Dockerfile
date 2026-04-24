@@ -20,11 +20,9 @@ RUN playwright install-deps chromium
 
 COPY . .
 
-# Ensure the downloads directory and app files are writable by anyone
-RUN mkdir -p /app/downloads && chmod -R 777 /app
+# Ensure the downloads directory and specific cache paths are writable
+RUN mkdir -p /app/downloads /app/.cache && chmod 777 /app/downloads /app/.cache
 
 EXPOSE 80
 
-# Run as root if needed for port 80, but drop to user via compose,
-# OR change port to 8080. Given port 80 is used, we'll keep CMD simple.
 CMD ["python", "app.py"]
