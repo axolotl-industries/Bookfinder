@@ -427,220 +427,141 @@ class SabnzbdClient:
             self.log(f"SABnzbd status check error: {e}")
         return "unknown"
 
-# --- Bibliography filter constants ---
-
-_FICTION_SUBJECTS = (
-    "fiction", "novel", "novels", "novella",
-    "short stories", "short story", "stories",
-    "science fiction", "fantasy fiction", "fantasy",
-    "speculative fiction", "cyberpunk",
-    "horror", "mystery", "thriller",
-    "american fiction", "english fiction", "literature",
-)
-
-_NON_FICTION_SUBJECTS = (
-    "non-fiction", "nonfiction", "biography", "autobiography", "memoir",
-    "history", "criticism", "manual", "textbook", "reference",
-    "bibliography", "cookbook", "calendar",
-    "comics", "graphic novels", "manga",
-    "juvenile", "children",
-    "puzzle", "brainteaser", "activities", "crafts",
-    "art", "photography", "study guide",
-    "anthology", "anthologies",
-)
-
-_CRUFT_TITLE_RE = re.compile(
-    r"\b(box set|trilogy|omnibus|selections|summary|analysis of|study guide|"
-    r"companion|trivia|unofficial|vol\.?\s*\d+|volume\s*\d+|issue|magazine|"
-    r"year['’]?s best|antholog|notebook|diary|journal|calendar|catalog|"
-    r"textbook|puzzle|brainteaser|crafts?|curriculum|workbook|teacher['’]?s guide|"
-    r"serise|collection|complete collection|set of \d+|pack of \d+|bundle)\b",
-    re.I,
-)
-
-# Transliterated titles often have these patterns (common in Hebrew/Russian/etc transliterations)
-# Expanded to catch more common transliteration marks and specific words.
-_TRANSLITERATED_RE = re.compile(r"([ḳḥṭṣẓśšžāīū]|^ha-|^ve-|^v-|^de-|^le-|^die-|^der-|^das-)", re.I)
-
-# Common English words that appear in titles.
-_ENGLISH_SURE_RE = re.compile(r"\b(the|and|for|with|from|that|this|they|them|your|been|have|will|shall|would|should|could|some|more|most|last|next|very|many|much|little|good|great|best|world|life|time|years?|days?|man|woman|child|house|place|thing|book|story|tales?|novels?|fiction|horror|fantasy|science|mystery|thriller|adventure|ghost|death|dark|light|white|black|red|blue|green|gold|silver|iron|stone|wood|fire|water|wind|earth|sky|sea|ocean|island|mountain|river|road|way|path|street|city|town|village|king|queen|prince|princess|lord|lady|knight|wizard|witch|magic|dragon|monster|beast|animal|cat|dog|bird|horse|wolf|lion|tiger|bear|eagle|snake|fish|tree|flower|sun|moon|star|night|day|morning|evening|winter|summer|spring|autumn|fall|war|peace|love|hate|fear|hope|dream|truth|lie|soul|heart|mind|body|blood|bone|hand|eye|face|head|voice|word|name|friend|enemy|hero|villain|god|devil|angel|heaven|hell|magic|power|sword|shield|armor|gun|knife|bullet|secret|hidden|lost|found|forgotten|remembered|beyond|between|within|without|through|above|below|under|over|across|against|around|about|after|before|since|until|while|during|because|although|unless|whether|either|neither|both|each|every|all|none|any|only|just|now|then|always|never|often|sometimes|seldom|rarely|wyrd|discworld|hitchhiker|hitchhikers|hitchhikers|hitch-hiker|hitch-hikers|zaphod|trillian|marvin|ford|beeblebrox|prefect|dent|vogon|vogons)\b", re.I)
-
-# Non-English articles that start translated titles (kept to unambiguously-foreign cases).
-_NON_ENG_ARTICLE_RE = re.compile(
-    r"^(una?|unos|unas|el|los|las|del|al|"
-    r"le|les|du|la|une?|des|aux|"
-    r"der|die|das|ein|eine|einen|dem|den|"
-    r"het|een|"
-    r"il|lo|gli|un['’]|una['’]|i|le|"
-    r"um|uma|os|as|dos|das|no|na|nos|nas)\s+",
-    re.I,
-)
-
-# Scripts that unambiguously aren't English (Cyrillic, CJK, Hiragana/Katakana, Arabic, Hebrew, Greek).
-_NON_LATIN_RE = re.compile(r"[Ѐ-ӿ一-鿿぀-ヿ؀-ۿ֐-׿Ͱ-Ͽ]")
-
-# Obvious non-English words that frequently appear in titles for noted authors
-_FOREIGN_WORDS_RE = re.compile(
-    r"\b(tome|livre|roman|edizione|edicion|biblioteca|coletânea|coleccion|enchanted|espagnol|français|deutsch|italiano|português|hebrew|russian|japanese|chinese|korean|illustrata|ilustrada|hardcover|paperback|ebook|epub|mobi|pdf|azw3|edicao|comemorativa|tradicional|voluntaria|aventuras|escaleras|historia|cuento|relato|libro|bos|koltuk|kitap|yayinlari|yazar|kapak|canto|cuco|post|ab|nur)\b",
-    re.I,
-)
+# --- Bibliography fetchers ---
 
 import random
 
-class GoogleBooksBibliography:
-    """Enumerates an author's books via the Google Books API.
-
-    Structured JSON. Each volume carries language, categories ("Fiction / ..."),
-    published date and ISBNs, so we can filter inline without scraping. No API
-    key required at the free tier (1,000 requests/day, well above anything a
-    homelab user will do).
+class WikidataBibliography:
+    """Uses Wikidata's SPARQL endpoint to get a canonical list of an author's works.
+    This is highly authoritative and avoids the 'garbage' found in catch-all databases.
     """
-
-    API = "https://www.googleapis.com/books/v1/volumes"
-    PAGE_SIZE = 40
-    MAX_PAGES = 25  # Increased to 1000 items (max possible)
+    SEARCH_URL = "https://www.wikidata.org/w/api.php"
+    SPARQL_URL = "https://query.wikidata.org/sparql"
+    USER_AGENT = "Bookfinder/1.0 (https://github.com/axolotl-industries/Bookfinder)"
 
     def __init__(self, client: httpx.AsyncClient, log: Callable = lambda _: None):
         self.client = client
         self.log = log
 
+    async def _get_author_id(self, author_name: str) -> Optional[str]:
+        # Refined search to prefer authors/writers
+        params = {
+            "action": "wbsearchentities",
+            "format": "json",
+            "language": "en",
+            "type": "item",
+            "search": author_name
+        }
+        try:
+            resp = await self.client.get(self.SEARCH_URL, params=params, headers={"User-Agent": self.USER_AGENT})
+            results = resp.json().get("search", [])
+            for res in results[:5]:
+                desc = res.get("description", "").lower()
+                # If the description mentions writer, author, novelist, or the person has a clear birth date
+                if any(w in desc for w in ["author", "writer", "novelist", "philosopher", "poet", "creator"]):
+                    return res["id"]
+            
+            if results:
+                return results[0]["id"]
+        except Exception as e:
+            self.log(f"Wikidata search error: {e}")
+        return None
+
     async def fetch(self, author_name: str) -> List[Dict]:
-        """Return a deduped list of the author's English fiction titles with
-        year + ISBNs. Empty list if the query yields nothing usable.
-        """
-        if not author_name:
+        author_id = await self._get_author_id(author_name)
+        if not author_id:
             return []
-        author_norm = normalize_text(author_name)
-        author_tokens = [t for t in author_norm.split() if len(t) > 1]
 
-        books: List[Dict] = []
-        seen: Dict[str, Dict] = {}
+        self.log(f"Fetching authoritative bibliography from Wikidata for {author_name} ({author_id})...")
 
-        for page in range(self.MAX_PAGES):
-            for attempt in range(3):
-                try:
-                    resp = await self.client.get(self.API, params={
-                        "q": f'inauthor:"{author_name}"',
-                        "maxResults": self.PAGE_SIZE,
-                        "startIndex": page * self.PAGE_SIZE,
-                        "langRestrict": "en",
-                        "printType": "books",
-                    })
-                    if resp.status_code == 429:
-                        await asyncio.sleep(2 + random.random() * 2)
-                        continue
-                    if resp.status_code != 200:
-                        break
-                    data = resp.json()
-                    break
-                except Exception:
-                    await asyncio.sleep(1)
-                    continue
-            else: # All attempts failed for this page
-                break
-
-            items = data.get("items") or []
-            if not items:
-                break
-
-            for item in items:
-                vol = item.get("volumeInfo") or {}
-                title = (vol.get("title") or "").strip()
-                if self._is_trash_title(title):
+        # Must be a literary work (Q7725634) or instance of book (Q571) or novel (Q8242)
+        query = f"""
+        SELECT DISTINCT ?itemLabel ?date WHERE {{
+          ?item wdt:P50 wd:{author_id}.
+          ?item wdt:P31/wdt:P279* wd:Q7725634. 
+          OPTIONAL {{ ?item wdt:P577 ?date. }}
+          SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
+        }}
+        ORDER BY ?date
+        """
+        
+        headers = {"User-Agent": self.USER_AGENT, "Accept": "application/sparql-results+json"}
+        try:
+            resp = await self.client.get(self.SPARQL_URL, params={"query": query}, headers=headers, timeout=60.0)
+            if resp.status_code != 200:
+                self.log(f"Wikidata SPARQL error: {resp.status_code}")
+                return []
+            
+            data = resp.json()
+            bindings = data.get("results", {}).get("bindings", [])
+            
+            books = {}
+            for b in bindings:
+                title = b.get("itemLabel", {}).get("value")
+                if not title or re.match(r"^Q\d+$", title):
                     continue
                 
-                # Filter out obvious non-authoritative publishers (curriculum, study guides)
-                publisher = (vol.get("publisher") or "").lower()
-                if "moving beyond the page" in publisher or "bright summaries" in publisher or "sparknotes" in publisher:
-                    continue
-
-                # Author match — the inauthor: query is fuzzy.
-                # Require the primary author name to be present in the volume's authors.
-                authors = vol.get("authors") or []
-                if author_tokens:
-                    joined = normalize_text(" ".join(authors))
-                    if not all(tok in joined for tok in author_tokens):
-                        continue
-
-                # English only. langRestrict is a hint, not a guarantee.
-                lang = vol.get("language")
-                if lang and lang != "en":
-                    continue
-
-                # Fiction only.
-                categories = vol.get("categories") or []
-                if categories:
-                    cat_str = " | ".join(categories).lower()
-                    is_fiction = "fiction" in cat_str or any(f in cat_str for f in _FICTION_SUBJECTS)
-                    if not is_fiction:
-                        continue
-
+                year_str = b.get("date", {}).get("value", "")
+                year = int(year_str[:4]) if re.match(r"^\d{4}", year_str) else None
+                
                 norm = normalize_text(title)
-                if not norm:
-                    continue
+                # Keep the earliest year found
+                if norm not in books or (year and (books[norm]["year"] is None or year < books[norm]["year"])):
+                    books[norm] = {"title": title, "year": year, "isbns": []}
+            
+            return sorted(books.values(), key=lambda x: (x.get("year") or 9999, x.get("title", "")))
+        except Exception as e:
+            self.log(f"Wikidata SPARQL error: {e}")
+            return []
 
-                year = None
-                m = re.match(r'(\d{4})', vol.get("publishedDate") or "")
-                if m:
-                    year = int(m.group(1))
 
-                isbns = []
-                for ident in vol.get("industryIdentifiers") or []:
-                    if ident.get("type") in ("ISBN_10", "ISBN_13"):
-                        ident_val = (ident.get("identifier") or "").strip()
-                        if ident_val:
-                            isbns.append(ident_val)
+class GoogleBooksBibliography:
+    API = "https://www.googleapis.com/books/v1/volumes"
+    
+    def __init__(self, client: httpx.AsyncClient, log: Callable = lambda _: None):
+        self.client = client
+        self.log = log
 
-                # Dedupe by normalized title; prefer the entry with the earliest
-                # publication year (the original edition) and richer ISBN data.
-                if norm in seen:
-                    existing = seen[norm]
-                    if year and (existing.get("year") is None or year < existing["year"]):
-                        existing["year"] = year
-                        existing["title"] = title
-                    # Merge ISBNs
-                    for i in isbns:
-                        if i not in existing["isbns"]:
-                            existing["isbns"].append(i)
-                else:
-                    seen[norm] = {"title": title, "year": year, "isbns": isbns}
+    async def fetch(self, author_name: str) -> List[Dict]:
+        """Simple fallback fetcher."""
+        try:
+            resp = await self.client.get(self.API, params={
+                "q": f'inauthor:"{author_name}"',
+                "maxResults": 40,
+                "langRestrict": "en",
+                "printType": "books",
+            })
+            if resp.status_code != 200: return []
+            items = resp.json().get("items") or []
+            books = {}
+            for item in items:
+                vol = item.get("volumeInfo") or {}
+                title = vol.get("title")
+                if not title: continue
+                year = int(vol.get("publishedDate")[:4]) if re.match(r"^\d{4}", vol.get("publishedDate") or "") else None
+                norm = normalize_text(title)
+                if norm not in books:
+                    books[norm] = {"title": title, "year": year, "isbns": []}
+            return list(books.values())
+        except: return []
 
-            if len(items) < self.PAGE_SIZE:
-                break
-
-        books = list(seen.values())
-        for b in books:
-            b["isbns"].sort(key=lambda x: (len(x) != 13, x))
-        return books
-
-    @staticmethod
-    def _is_trash_title(title: str) -> bool:
-        if not title: return True
-        if _CRUFT_TITLE_RE.search(title): return True
-        if _TRANSLITERATED_RE.search(title): return True
-        if _NON_ENG_ARTICLE_RE.search(title): return True
-        if _NON_LATIN_RE.search(title): return True
-        if _FOREIGN_WORDS_RE.search(title): return True
-        
-        # Only use langdetect for reasonably long titles to avoid false positives on short ones.
-        if len(title) > 25:
-            try:
-                lang = detect(title)
-                if lang != 'en':
-                    # If it's a "not-English" detection, but contains very common English markers,
-                    # we might still want it (e.g. Isaac Asimov's science titles).
-                    english_tokens = _ENGLISH_SURE_RE.findall(title)
-                    # Require at least 2 DISTINCT English sure words.
-                    if len(set(t.lower() for t in english_tokens)) < 2:
-                        return True
-            except:
-                pass
-        return False
+    async def get_isbns(self, author: str, title: str) -> List[str]:
+        """Try to find ISBNs for a specific canonical title."""
+        try:
+            resp = await self.client.get(self.API, params={"q": f'intitle:"{title}" inauthor:"{author}"', "maxResults": 5})
+            if resp.status_code != 200: return []
+            isbns = []
+            for item in (resp.json().get("items") or []):
+                for ident in (item.get("volumeInfo", {}).get("industryIdentifiers") or []):
+                    if ident.get("type") in ("ISBN_13", "ISBN_10"):
+                        isbns.append(ident["identifier"])
+            return list(set(isbns))
+        except: return []
 
 
 class MetadataFetcher:
     def __init__(self):
-        self.client = httpx.AsyncClient(timeout=20.0, verify=False, headers={"User-Agent": UA})
+        self.client = httpx.AsyncClient(timeout=30.0, verify=False, headers={"User-Agent": UA})
 
     async def aclose(self):
         await self.client.aclose()
@@ -669,86 +590,57 @@ class MetadataFetcher:
         except: return []
 
     async def get_author_books(self, author_id: str, author_name: str = "", query: Optional[str] = None) -> List[Dict]:
-        """Return the author's English fiction bibliography.
-
-        Primary source is the Google Books API — structured JSON with language,
-        categories, publish date and ISBNs, so we filter inline without scraping. For very obscure
-        authors where Google Books returns nothing, fall back to OpenLibrary's
-        work-level endpoint filtered on subject tags.
-        """
+        """Return the author's English fiction bibliography."""
         books: List[Dict] = []
-
         if author_name:
-            try:
-                books = await GoogleBooksBibliography(self.client).fetch(author_name)
-            except Exception:
-                books = []
+            books = await WikidataBibliography(self.client).fetch(author_name)
 
-        if not books:
-            raw = await self._fetch_ol_works(author_id)
-            books = [b for b in raw if self._passes_ol_filter(b)]
-            for b in books:
-                b.pop("_subjects", None)
+        if not books and author_name:
+            books = await GoogleBooksBibliography(self.client).fetch(author_name)
 
         if query:
             q = normalize_text(query)
             books = [b for b in books if q in normalize_text(b["title"])]
 
+        # Limited enrichment for the UI: try to get ISBNs for the first 25 books
+        # to help the downloader find high-quality mirrors.
+        gb = GoogleBooksBibliography(self.client)
+        enrichment_tasks = []
+        for b in books[:25]:
+            if not b["isbns"]:
+                enrichment_tasks.append(self._enrich_book(gb, author_name, b))
+        
+        if enrichment_tasks:
+            await asyncio.gather(*enrichment_tasks)
+
         return sorted(books, key=lambda x: (x.get("year") or 9999, x.get("title", "")))
 
+    async def _enrich_book(self, gb: GoogleBooksBibliography, author: str, book: Dict):
+        try:
+            book["isbns"] = await gb.get_isbns(author, book["title"])
+        except:
+            pass
+
     async def _fetch_ol_works(self, author_id: str) -> List[Dict]:
-        """Fetch raw works for this author from OpenLibrary, no filtering yet."""
-        key = author_id.split('/')[-1]  # accept either "OL123A" or "/authors/OL123A"
-        offset, limit = 0, 200
+        """Fetch raw works from OpenLibrary."""
+        key = author_id.split('/')[-1]
+        offset, limit = 0, 100
         books: List[Dict] = []
-        while True:
-            try:
-                resp = await self.client.get(
-                    f"https://openlibrary.org/authors/{key}/works.json",
-                    params={"limit": limit, "offset": offset},
-                )
-                if resp.status_code != 200:
-                    break
-                entries = resp.json().get("entries") or []
-            except Exception:
-                break
-            if not entries:
-                break
-            for work in entries:
-                title = (work.get("title") or "").strip()
-                if GoogleBooksBibliography._is_trash_title(title):
-                    continue
-                books.append({
-                    "title": title,
-                    "year": self._extract_year(work.get("first_publish_date")),
-                    "isbns": [],  # ISBNs live on editions; the downloader falls back to author+title.
-                    "_subjects": [str(s).lower() for s in (work.get("subjects") or [])],
-                })
-            if len(entries) < limit:
-                break
-            offset += limit
+        try:
+            resp = await self.client.get(f"https://openlibrary.org/authors/{key}/works.json", params={"limit": limit})
+            if resp.status_code == 200:
+                for work in resp.json().get("entries") or []:
+                    books.append({
+                        "title": work.get("title"),
+                        "year": self._extract_year(work.get("first_publish_date")),
+                        "isbns": []
+                    })
+        except: pass
         return books
-
-    @classmethod
-    def _passes_ol_filter(cls, book: Dict) -> bool:
-        title = book["title"]
-        if GoogleBooksBibliography._is_trash_title(title):
-            return False
-        return cls._is_fiction_work(book.get("_subjects") or [])
-
-    @staticmethod
-    def _is_fiction_work(subjects: List[str]) -> bool:
-        if not subjects:
-            return True
-        s_all = " | ".join(subjects).lower()
-        if any(f in s_all for f in _FICTION_SUBJECTS):
-            return True
-        return not any(n in s_all for n in _NON_FICTION_SUBJECTS)
 
     @staticmethod
     def _extract_year(date_value) -> Optional[int]:
-        if not date_value:
-            return None
+        if not date_value: return None
         m = re.search(r'\b(1[89]\d{2}|20\d{2})\b', str(date_value))
         return int(m.group()) if m else None
 
