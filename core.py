@@ -173,6 +173,7 @@ class SabnzbdClient:
                             status = s.get("status", "").lower()
                             if status == "completed": return "completed"
                             if "failed" in status: return "failed"
+        except asyncio.CancelledError: raise
         except Exception as e:
             self.log(f"SABnzbd status check error: {e}")
         return "unknown"
@@ -441,7 +442,7 @@ class Downloader:
                 try: 
                     os.chmod(path, 0o777)
                     os.chown(path, 65534, 65534)
-                except: pass
+                except Exception: pass
 
                 if zipfile.is_zipfile(path):
                     with zipfile.ZipFile(path) as z:
@@ -454,11 +455,12 @@ class Downloader:
                                 try: 
                                     os.chmod(path, 0o777)
                                     os.chown(path, 65534, 65534)
-                                except: pass
-                            except: pass
+                                except Exception: pass
+                            except Exception: pass
                             self.log(f"Saved to: {path}")
                             return True
                 if os.path.exists(path): os.remove(path)
-            except:
+            except asyncio.CancelledError: raise
+            except Exception:
                 if os.path.exists(path): os.remove(path)
         return False

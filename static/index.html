@@ -214,7 +214,6 @@
 
         async function stopJob() {
             if(!currentJobId) return;
-            if(!confirm("Are you sure you want to stop the current process?")) return;
             await fetch(`/stop_job/${currentJobId}`, { method: 'POST' });
         }
 
