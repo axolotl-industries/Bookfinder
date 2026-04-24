@@ -10,10 +10,8 @@ import sys
 import shutil
 import unicodedata
 import xml.etree.ElementTree as ET
-from langdetect import detect, DetectorFactory
 from pathlib import Path
 
-DetectorFactory.seed = 0
 from typing import List, Dict, Optional, Tuple, Generator, Callable
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, Browser
