@@ -66,7 +66,7 @@ class NewznabScraper:
         }
         
         try:
-            async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=15.0, verify=False, follow_redirects=True) as client:
                 resp = await client.get(f"{self.api_url}/api", params=params)
                 if resp.status_code != 200:
                     self.log(f"Usenet API error: {resp.status_code}")
@@ -126,7 +126,7 @@ class SabnzbdClient:
             "output": "json"
         }
         try:
-            async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=15.0, verify=False, follow_redirects=True) as client:
                 resp = await client.get(f"{self.url}/api", params=params)
                 data = resp.json()
                 if data.get("status") and data.get("nzo_ids"):
@@ -141,7 +141,7 @@ class SabnzbdClient:
     async def check_status(self, nzo_id: str) -> str:
         """Returns 'downloading', 'completed', 'failed', or 'unknown'"""
         try:
-            async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=10.0, verify=False, follow_redirects=True) as client:
                 # 1. Check Queue
                 resp = await client.get(f"{self.url}/api", params={"mode": "queue", "nzo_id": nzo_id, "apikey": self.api_key, "output": "json"})
                 q_data = resp.json()
