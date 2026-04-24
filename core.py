@@ -59,7 +59,7 @@ class NewznabScraper:
         if not self.api_url or not self.api_key: return []
         self.log(f"Searching Usenet for '{author} {title}'...")
         
-        # Try specific book categories first, fallback to general search if needed
+        # Try specific book categories first
         params = {
             "t": "search",
             "cat": "7000,7020,8010",
@@ -68,52 +68,56 @@ class NewznabScraper:
             "o": "json"
         }
         
+        url = f"{self.api_url}/api"
+        self.log(f"DEBUG URL: {url}?{'&'.join([f'{k}={v}' for k,v in params.items()])}")
+        
         try:
             async with httpx.AsyncClient(timeout=15.0, verify=False, follow_redirects=True) as client:
-                resp = await client.get(f"{self.api_url}/api", params=params)
+                resp = await client.get(url, params=params)
+                self.log(f"DEBUG RESPONSE (First 500 chars): {resp.text[:500]}")
+                
                 if resp.status_code != 200:
                     self.log(f"Usenet API error: {resp.status_code}")
                     return []
                 
-                # Try JSON first
                 items = []
+                # Try JSON first
                 try:
                     data = resp.json()
-                    items = data.get("item", [])
-                    if not items and "channel" in data:
-                        items = data.get("channel", {}).get("item", [])
-                except Exception:
-                    # Fallback to XML parsing if JSON fails
-                    self.log("Usenet returned non-JSON, attempting robust XML parse...")
-                    try:
-                        # 1. Try BeautifulSoup with multiple strategies
-                        soup = BeautifulSoup(resp.text, 'html.parser')
-                        xml_items = soup.find_all('item')
-                        
-                        if not xml_items:
-                            # 2. Try regex fallback if parser fails (often happens with namespaced XML)
-                            titles = re.findall(r'<title>(.*?)</title>', resp.text)
-                            links = re.findall(r'<link>(.*?)</link>', resp.text)
-                            # Zip them together, skipping the first (channel) title
-                            if len(titles) > 1:
-                                for t, l in zip(titles[1:], links[1:]):
-                                    items.append({"title": t, "link": l})
-                        else:
-                            for item in xml_items:
-                                title_tag = item.find('title')
-                                link_tag = item.find('link')
-                                enclosure_tag = item.find('enclosure')
-                                items.append({
-                                    "title": title_tag.get_text() if title_tag else "",
-                                    "link": link_tag.get_text() if link_tag else "",
-                                    "enclosure": {"@url": enclosure_tag['url']} if (enclosure_tag and enclosure_tag.has_attr('url')) else None
-                                })
-                    except Exception as parse_err:
-                        self.log(f"XML parse failed: {parse_err}")
+                    raw_items = data.get("item", [])
+                    if not raw_items and "channel" in data:
+                        raw_items = data.get("channel", {}).get("item", [])
+                    if not isinstance(raw_items, list): raw_items = [raw_items] if raw_items else []
                     
-                    self.log(f"Usenet parse found {len(items)} items")
+                    for item in raw_items:
+                        items.append({
+                            "title": item.get("title", ""),
+                            "link": item.get("link", ""),
+                            "enclosure": item.get("enclosure")
+                        })
+                except Exception:
+                    self.log("Usenet returned non-JSON or malformed JSON, attempting robust XML/Regex parse...")
+                    # Regex-based extraction is often more reliable for varied RSS formats
+                    titles = re.findall(r'<title>(.*?)</title>', resp.text, re.I | re.S)
+                    links = re.findall(r'<link>(.*?)</link>', resp.text, re.I | re.S)
+                    enclosures = re.findall(r'<enclosure[^>]+url=["\'](.*?)["\']', resp.text, re.I | re.S)
+                    
+                    # Newznab often has the first title/link as the channel info
+                    if len(titles) > 1:
+                        # Find all <item> blocks to be more precise
+                        item_blocks = re.findall(r'<item>(.*?)</item>', resp.text, re.I | re.S)
+                        for block in item_blocks:
+                            i_title = re.search(r'<title>(.*?)</title>', block, re.I | re.S)
+                            i_link = re.search(r'<link>(.*?)</link>', block, re.I | re.S)
+                            i_enc = re.search(r'<enclosure[^>]+url=["\'](.*?)["\']', block, re.I | re.S)
+                            
+                            items.append({
+                                "title": i_title.group(1).strip() if i_title else "",
+                                "link": i_link.group(1).strip() if i_link else "",
+                                "enclosure": {"@url": i_enc.group(1).strip()} if i_enc else None
+                            })
                 
-                if not isinstance(items, list): items = [items] if items else []
+                self.log(f"Usenet parse found {len(items)} items")
 
                 results = []
                 norm_title = normalize_text(title)
@@ -121,6 +125,8 @@ class NewznabScraper:
 
                 for item in items:
                     res_title = item.get("title", "")
+                    # Clean XML CDATA or entities if present
+                    res_title = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', res_title)
                     norm_res_title = normalize_text(res_title)
                     
                     # Validation: title must match, and at least one author part must be present
@@ -129,13 +135,17 @@ class NewznabScraper:
                     
                     if title_match and author_match:
                         # Extract link (prefer enclosure, fallback to link)
-                        link = item.get("link")
+                        link = item.get("link", "")
                         if isinstance(item.get("enclosure"), dict):
                             link = item["enclosure"].get("@url", link)
                         elif isinstance(item.get("enclosure"), list) and item["enclosure"]:
-                            link = item["enclosure"][0].get("@url", link)
+                            for e in item["enclosure"]:
+                                if isinstance(e, dict) and e.get("@url"):
+                                    link = e["@url"]; break
 
                         if link:
+                            # Clean XML entities in link
+                            link = link.replace("&amp;", "&")
                             self.log(f"Found Usenet match: {res_title[:50]}...")
                             results.append({"title": res_title, "link": link})
                 
@@ -170,6 +180,7 @@ class SabnzbdClient:
                     self.log(f"Sent to SABnzbd. ID: {nzo_id}")
                     return nzo_id
                 self.log(f"SABnzbd add failed: {data}")
+        except asyncio.CancelledError: raise
         except Exception as e:
             self.log(f"SABnzbd error: {e}")
         return None
@@ -182,20 +193,18 @@ class SabnzbdClient:
                 resp = await client.get(f"{self.url}/api", params={"mode": "queue", "nzo_id": nzo_id, "apikey": self.api_key, "output": "json"})
                 q_data = resp.json()
                 slots = q_data.get("queue", {}).get("slots", [])
-                if slots:
-                    for s in slots:
-                        if s.get("nzo_id") == nzo_id: return "downloading"
+                for s in slots:
+                    if s.get("nzo_id") == nzo_id: return "downloading"
                 
                 # 2. Check History
                 resp = await client.get(f"{self.url}/api", params={"mode": "history", "nzo_id": nzo_id, "apikey": self.api_key, "output": "json"})
                 h_data = resp.json()
                 slots = h_data.get("history", {}).get("slots", [])
-                if slots:
-                    for s in slots:
-                        if s.get("nzo_id") == nzo_id:
-                            status = s.get("status", "").lower()
-                            if status == "completed": return "completed"
-                            if "failed" in status: return "failed"
+                for s in slots:
+                    if s.get("nzo_id") == nzo_id:
+                        status = s.get("status", "").lower()
+                        if status == "completed": return "completed"
+                        if "failed" in status: return "failed"
         except asyncio.CancelledError: raise
         except Exception as e:
             self.log(f"SABnzbd status check error: {e}")
@@ -211,58 +220,26 @@ class MetadataFetcher:
             response = self.client.get(f"https://openlibrary.org/search/authors.json", params={"q": clean_name})
             docs = response.json().get("docs", [])
             if not docs: return []
-            
-            # Take top 5 likely matches
             candidates = sorted(docs[:10], key=lambda x: x.get("work_count", 0), reverse=True)[:5]
             detailed_results = []
-            
             for doc in candidates:
                 key = doc["key"]
-                author_data = {
-                    "id": key,
-                    "name": doc.get("name"),
-                    "top_work": doc.get("top_work"),
-                    "work_count": doc.get("work_count"),
-                    "birth_date": doc.get("birth_date"),
-                    "bio": "",
-                    "photo_url": ""
-                }
-                
-                # Fetch detailed bio and photo info
+                author_data = {"id": key, "name": doc.get("name"), "top_work": doc.get("top_work"), "work_count": doc.get("work_count"), "birth_date": doc.get("birth_date"), "bio": "", "photo_url": ""}
                 try:
                     resp = self.client.get(f"https://openlibrary.org/authors/{key}.json")
                     if resp.status_code == 200:
                         data = resp.json()
-                        # Bio can be a string or a dict with a 'value' key
                         bio = data.get("bio", "")
                         author_data["bio"] = bio.get("value", bio) if isinstance(bio, dict) else bio
-                        
-                        if data.get("photos"):
-                            author_data["photo_url"] = f"https://covers.openlibrary.org/a/id/{data['photos'][0]}-M.jpg"
+                        if data.get("photos"): author_data["photo_url"] = f"https://covers.openlibrary.org/a/id/{data['photos'][0]}-M.jpg"
                 except: pass
-                
                 detailed_results.append(author_data)
             return detailed_results
         except: return []
 
     def get_author_books(self, author_id: str, query: Optional[str] = None) -> List[Dict]:
         books, seen, page = [], set(), 1
-        # Robust filtering for omnibuses, anthologies, non-fiction, and non-primary works
-        CRUFT = [
-            r"\bbox set\b", r"\btrilogy\b", r"\bomnibus\b", r"\bselections\b",
-            r"\bsummary\b", r"\banalysis\b", r"\bstudy guide\b", r"\bcompanion\b",
-            r"\btrivia\b", r"\bunofficial\b", r"\bnotebook\b", r"\bdiary\b",
-            r"\bjournal\b", r"\bcalendar\b", r"\bcatalog\b", r"\bbin\b",
-            r"\bpack\b", r"\bx\d+\b", r"\bd/b\b", r"\bÚ10\b",
-            r"\bvol\.\s*\d+\b", r"\bvolume\s*\d+\b", r"\bissue\b", r"\bmagazine\b",
-            r"\breader\b", r"\bcollege\b", r"\bcourse\b", r"\btextbook\b",
-            r"\bcookbook\b", r"\bkitchen\b", r"\bcomic\b", r"\bgraphic novel\b",
-            r"\bmanga\b", r"\bedited by\b", r"\bvarious authors\b",
-            r"\[\d+/\d+\]", r"\(part \d+\)",
-            r"\bthe best (american|british|science|horror|mystery|sports)\b",
-            r" / ", r" & ", r" ; "
-        ]
-        
+        CRUFT = [r"\bbox set\b", r"\btrilogy\b", r"\bomnibus\b", r"\bselections\b", r"\bsummary\b", r"\banalysis\b", r"\bstudy guide\b", r"\bcompanion\b", r"\btrivia\b", r"\bunofficial\b", r"\bnotebook\b", r"\bdiary\b", r"\bjournal\b", r"\bcalendar\b", r"\bcatalog\b", r"\bbin\b", r"\bpack\b", r"\bx\d+\b", r"\bd/b\b", r"\bÚ10\b", r"\bvol\.\s*\d+\b", r"\bvolume\s*\d+\b", r"\bissue\b", r"\bmagazine\b", r"\breader\b", r"\bcollege\b", r"\bcourse\b", r"\btextbook\b", r"\bcookbook\b", r"\bkitchen\b", r"\bcomic\b", r"\bgraphic novel\b", r"\bmanga\b", r"\bedited by\b", r"\bvarious authors\b", r"\[\d+/\d+\]", r"\(part \d+\)", r"\bthe best (american|british|science|horror|mystery|sports)\b", r" / ", r" & ", r" ; "]
         while True:
             try:
                 resp = self.client.get("https://openlibrary.org/search.json", params={"author": author_id, "language": "eng", "fields": "title,isbn,first_publish_year,subject", "page": page})
@@ -270,35 +247,15 @@ class MetadataFetcher:
                 if not docs: break
                 for doc in docs:
                     title = doc.get("title", "")
-                    if not title: continue
-                    
-                    # 1. Title Cruft Check
-                    t_lower = title.lower()
-                    if any(re.search(p, t_lower) for p in CRUFT): continue
-                    
-                    # 2. Subject Filter
+                    if not title or any(re.search(p, title.lower()) for p in CRUFT): continue
                     subjects = [s.lower() for s in doc.get("subject", [])]
                     NON_WANTED = ["history", "criticism", "manual", "biography", "non-fiction", "nonfiction", "bibliography", "cookbook", "calendar", "comics", "graphic novels", "periodicals", "study guide"]
-                    # Whitelist core fiction genres to prevent accidental filtering
                     WANTED_GENRES = ["fiction", "short stories", "novel", "literature", "science fiction", "fantasy", "speculative fiction", "cyberpunk", "horror", "mystery", "thriller"]
-                    
                     if subjects:
-                        if any(term in s for term in NON_WANTED for s in subjects):
-                            # Only discard if it doesn't also contain a wanted genre (e.g., "Fiction / History" should stay)
-                            if not any(term in s for term in WANTED_GENRES for s in subjects):
-                                continue
-                        
-                    # 3. Primary Work Verification
-                    if subjects:
-                        is_fiction = any(term in s for term in WANTED_GENRES for s in subjects)
-                        if not is_fiction: continue
-                    # If NO subjects are listed, we assume it's a candidate rather than discarding it
-
-                    # 4. Normalization and Deduplication
+                        if any(term in s for term in NON_WANTED for s in subjects) and not any(term in s for term in WANTED_GENRES for s in subjects): continue
+                    if subjects and not any(term in s for term in WANTED_GENRES for s in subjects): continue
                     norm = normalize_text(title)
-                    if not norm: continue
-                    if query and normalize_text(query) not in norm: continue
-                    
+                    if not norm or (query and normalize_text(query) not in norm): continue
                     if norm not in seen:
                         books.append({"title": title, "isbns": [i for i in doc.get("isbn", []) if len(i) in [10, 13]], "year": doc.get("first_publish_year")})
                         seen.add(norm)
@@ -308,8 +265,8 @@ class MetadataFetcher:
         return sorted(books, key=lambda x: (x.get("year") or 0))
 
 class ScraperEngine:
-    def __init__(self, log_func: Callable, p_url: str = None, p_key: str = None):
-        self.log, self.p_url, self.p_key = log_func, p_url, p_key
+    def __init__(self, log_func: Callable):
+        self.log = log_func
         self.browser, self.playwright, self.annas_base = None, None, ""
         self.client = httpx.AsyncClient(verify=False, timeout=20.0, follow_redirects=True, headers={"User-Agent": UA})
 
@@ -325,113 +282,62 @@ class ScraperEngine:
         except: pass
         await self.client.aclose()
 
+    async def _resolve_mirror(self, url: str, page: Browser) -> Optional[str]:
+        try:
+            await page.goto(url, timeout=15000)
+            link = BeautifulSoup(await page.content(), 'html.parser').find('a', href=re.compile(r"get\.php|/get/|download", re.I))
+            if link: return urljoin(url, link['href'])
+        except asyncio.CancelledError: raise
+        except Exception: pass
+        return None
+
     async def get_mirrors(self, author: str, title: str, isbns: List[str]) -> List[Tuple[str, str]]:
-        """Returns a list of mirrors instead of yielding to prevent GeneratorExit issues."""
         mirrors = []
         page = await self.browser.new_page()
-        
-        norm_title = normalize_text(title)
-        # Use first two words of author for matching to be robust against "Stephen King" vs "King, Stephen"
-        author_parts = [p for p in normalize_text(author).split() if len(p) > 2]
-        
-        queries = []
-        if isbns: queries.append(isbns[0])
-        # Search query: Author + Title (title stripped of leading articles)
-        clean_title = re.sub(r'^the\s+|^a\s+|^an\s+', '', title.lower())
-        queries.append(f"{author} {clean_title}")
-
+        norm_title, author_parts = normalize_text(title), [p for p in normalize_text(author).split() if len(p) > 2]
+        queries = [isbns[0]] if isbns else []
+        queries.append(f"{author} {re.sub(r'^the\s+|^a\s+|^an\s+', '', title.lower())}")
         try:
             for q in queries:
-                # 1. Libgen
                 self.log(f"Searching Libgen for '{q}'...")
                 try:
                     await page.goto(f"https://libgen.li/index.php?req={quote(q)}&res=25&filesuns=all", timeout=30000)
                     soup = BeautifulSoup(await page.content(), 'html.parser')
-                    # Table 1 is the results table. Its rows start from index 1.
-                    # Column layout based on inspection:
-                    # 0: Title (contains ID/Series too)
-                    # 1: Author
-                    # 2: Publisher
-                    # 3: Year
-                    # 4: Language
-                    # 5: Pages
-                    # 6: Size
-                    # 7: Extension
-                    # 8: Mirrors (links)
-                    
                     rows = soup.select('table[id="table-libgen"] tr') or soup.find_all('tr')[1:]
                     for r in rows:
                         cols = r.find_all('td')
                         if len(cols) < 8: continue
-                        
-                        # Clean up Libgen's merged text/ID strings
-                        row_raw_title = cols[0].get_text(strip=True).lower()
-                        row_author = cols[1].get_text(strip=True).lower()
-                        row_lang = cols[4].get_text(strip=True).lower()
-                        row_ext = cols[7].get_text(strip=True).lower()
-
-                        is_epub = 'epub' in row_ext
-                        is_eng = any(l in row_lang for l in ['english', 'eng', 'english']) or not row_lang.strip()
-                        
-                        # Title verification: target title must appear in the title blob
-                        title_match = norm_title in normalize_text(row_raw_title)
-                        
-                        # Author verification: must match one part of author name
-                        author_match = any(p in row_author for p in author_parts) if author_parts else True
-
-                        if is_epub and is_eng and title_match and author_match:
-                            # Mirrors are in the last or second to last column
-                            mirror_col = cols[-1]
-                            ads = mirror_col.find('a', href=re.compile(r"ads\.php"))
+                        raw_t, raw_a, raw_l, raw_e = cols[0].get_text(strip=True).lower(), cols[1].get_text(strip=True).lower(), cols[4].get_text(strip=True).lower(), cols[7].get_text(strip=True).lower()
+                        if 'epub' in raw_e and (any(l in raw_l for l in ['english', 'eng']) or not raw_l.strip()) and norm_title in normalize_text(raw_t) and (any(p in raw_a for p in author_parts) if author_parts else True):
+                            ads = cols[-1].find('a', href=re.compile(r"ads\.php"))
                             if ads:
                                 direct = await self._resolve_mirror(urljoin("https://libgen.li", ads['href']), page)
-                                if direct: 
-                                    self.log(f"Found Libgen match: {row_raw_title[:40]}...")
-                                    mirrors.append(("Libgen", direct))
-                                    if len(mirrors) >= 2: break
+                                if direct: self.log(f"Found Libgen match: {raw_t[:40]}..."); mirrors.append(("Libgen", direct)); break
                     if mirrors: break
-                except Exception as e: 
-                    self.log(f"Libgen error: {e}")
+                except asyncio.CancelledError: raise
+                except Exception as e: self.log(f"Libgen error: {e}")
 
-                # 2. Anna's
                 self.log(f"Searching Anna's for '{q}'...")
                 try:
                     await page.goto(f"{self.annas_base}/search?q={quote(q)}&ext=epub&lang=en", timeout=30000)
                     results = BeautifulSoup(await page.content(), 'html.parser').select('a[href*="/md5/"]')
                     for cand in results[:3]:
-                        cand_text = normalize_text(cand.get_text())
-                        
-                        # Verify title AND author even for ISBN searches
-                        title_match = norm_title in cand_text
-                        author_match = any(p in cand_text for p in author_parts) if author_parts else True
-                        
-                        if title_match and author_match:
+                        cand_t = normalize_text(cand.get_text())
+                        if norm_title in cand_t and (any(p in cand_t for p in author_parts) if author_parts else True):
                             await page.goto(urljoin(self.annas_base, cand['href']), timeout=30000)
                             msoup = BeautifulSoup(await page.content(), 'html.parser')
                             lg = msoup.find('a', href=re.compile(r"libgen\.li/ads\.php"))
                             if lg:
                                 direct = await self._resolve_mirror(lg['href'], page)
-                                if direct: 
-                                    self.log(f"Found Anna match: {cand_text[:30]}...")
-                                    mirrors.append(("Anna Libgen", direct))
+                                if direct: self.log(f"Found Anna match: {cand_t[:30]}..."); mirrors.append(("Anna Libgen", direct))
                             ipfs = msoup.find('a', href=re.compile(r"ipfs"))
-                            if ipfs and 'ipfs://' in ipfs['href']:
-                                mirrors.append(("IPFS", f"https://ipfs.io/ipfs/{ipfs['href'].split('ipfs://')[1]}"))
+                            if ipfs and 'ipfs://' in ipfs['href']: mirrors.append(("IPFS", f"https://ipfs.io/ipfs/{ipfs['href'].split('ipfs://')[1]}"))
                             if len(mirrors) >= 3: break
                     if mirrors: break
-                except Exception as e:
-                    self.log(f"Anna error: {e}")
-        finally: 
-            await page.close()
+                except asyncio.CancelledError: raise
+                except Exception as e: self.log(f"Anna error: {e}")
+        finally: await page.close()
         return mirrors
-async def _resolve_mirror(self, url: str, page: Browser) -> Optional[str]:
-    try:
-        await page.goto(url, timeout=15000)
-        link = BeautifulSoup(await page.content(), 'html.parser').find('a', href=re.compile(r"get\.php|/get/|download", re.I))
-        if link: return urljoin(url, link['href'])
-    except asyncio.CancelledError: raise
-    except Exception: pass
-    return None
 
 class Downloader:
     def __init__(self, base_dir: str, log_func: Callable):
@@ -439,15 +345,12 @@ class Downloader:
         self.log = log_func
         self.ssl_ctx = create_robust_ssl_context()
         os.makedirs(self.base_dir, exist_ok=True)
-        # Ensure base directory itself is accessible
         try: os.chmod(self.base_dir, 0o777)
         except: pass
 
     async def download(self, mirror: str, url: str, author: str, title: str, book_data: Dict) -> bool:
-        # Save directly to base_dir, no author subfolders
         safe_title = re.sub(r'[\\/*?:"<>|]', "", title)
         path = os.path.join(self.base_dir, f"{safe_title}.epub")
-
         for cfg in [{"verify": self.ssl_ctx}, {"verify": False}]:
             try:
                 async with httpx.AsyncClient(follow_redirects=True, timeout=60.0, headers={"User-Agent": UA}, **cfg) as client:
@@ -455,18 +358,12 @@ class Downloader:
                         if resp.status_code != 200 or "text/html" in resp.headers.get("Content-Type", "").lower(): continue
                         size = int(resp.headers.get("Content-Length", 0))
                         if size > 0 and (size < 10000 or size > 40*1024*1024): continue
-                        
                         self.log(f"Downloading from {mirror}...")
                         with open(path, "wb") as f:
                             async for chunk in resp.aiter_bytes(): f.write(chunk)
                             f.flush(); os.fsync(f.fileno())
-                
-                # Set absolute permissive permissions and ownership to nobody
-                try: 
-                    os.chmod(path, 0o777)
-                    os.chown(path, 65534, 65534)
+                try: os.chmod(path, 0o777); os.chown(path, 65534, 65534)
                 except Exception: pass
-
                 if zipfile.is_zipfile(path):
                     with zipfile.ZipFile(path) as z:
                         if 'mimetype' in z.namelist():
@@ -474,14 +371,10 @@ class Downloader:
                                 meta = ebookmeta.get_metadata(path)
                                 meta.title, meta.author_list_to_string = title, author
                                 ebookmeta.set_metadata(path, meta)
-                                # Re-apply 777 and nobody ownership after tagging
-                                try: 
-                                    os.chmod(path, 0o777)
-                                    os.chown(path, 65534, 65534)
+                                try: os.chmod(path, 0o777); os.chown(path, 65534, 65534)
                                 except Exception: pass
-                            except Exception: pass
-                            self.log(f"Saved to: {path}")
-                            return True
+                            except: pass
+                            self.log(f"Saved to: {path}"); return True
                 if os.path.exists(path): os.remove(path)
             except asyncio.CancelledError: raise
             except Exception:
