@@ -45,36 +45,65 @@ async def resolve_annas_domain(log_func: Callable) -> str:
 
 class NewznabScraper:
     def __init__(self, api_url: str, api_key: str, log_func: Callable):
-        self.api_url = api_url.rstrip('/')
-        self.api_key = api_key
+        # Clean URL: strip trailing slashes and common API suffixes to ensure we control the endpoint
+        base = api_url.strip().split('?')[0].rstrip('/')
+        if base.endswith('/api'): base = base[:-4]
+        self.api_url = base
+        self.api_key = api_key.strip()
         self.log = log_func
 
     async def search(self, author: str, title: str) -> List[Dict]:
         if not self.api_url or not self.api_key: return []
         self.log(f"Searching Usenet for '{author} {title}'...")
-        # Use t=book if supported, or t=search with book categories (7000 range)
+        
+        # Try specific book categories first, fallback to general search if needed
         params = {
             "t": "search",
-            "cat": "7000,7020",
+            "cat": "7000,7020,8010",
             "q": f"{author} {title}",
             "apikey": self.api_key,
             "o": "json"
         }
+        
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
                 resp = await client.get(f"{self.api_url}/api", params=params)
-                if resp.status_code != 200: return []
+                if resp.status_code != 200:
+                    self.log(f"Usenet API error: {resp.status_code}")
+                    return []
+                
                 data = resp.json()
+                # Handle various Newznab JSON structures
+                items = data.get("item", [])
+                if not items and "channel" in data:
+                    items = data.get("channel", {}).get("item", [])
+                
+                if not isinstance(items, list): items = [items] if items else []
+
                 results = []
-                for item in data.get("item", []):
-                    res_title = item.get("title", "").lower()
-                    # Basic validation: must contain title and author
-                    if normalize_text(title) in normalize_text(res_title) and any(p.lower() in res_title for p in author.split() if len(p) > 2):
-                        results.append({
-                            "title": item.get("title"),
-                            "link": item.get("link"),
-                            "size": int(item.get("enclosure", {}).get("@attributes", {}).get("length", 0))
-                        })
+                norm_title = normalize_text(title)
+                author_parts = [p.lower() for p in normalize_text(author).split() if len(p) > 2]
+
+                for item in items:
+                    res_title = item.get("title", "")
+                    norm_res_title = normalize_text(res_title)
+                    
+                    # Validation: title must match, and at least one author part must be present
+                    title_match = norm_title in norm_res_title
+                    author_match = any(p in norm_res_title for p in author_parts) if author_parts else True
+                    
+                    if title_match and author_match:
+                        # Extract link (prefer enclosure, fallback to link)
+                        link = item.get("link")
+                        if isinstance(item.get("enclosure"), dict):
+                            link = item["enclosure"].get("@url", link)
+                        elif isinstance(item.get("enclosure"), list) and item["enclosure"]:
+                            link = item["enclosure"][0].get("@url", link)
+
+                        if link:
+                            self.log(f"Found Usenet match: {res_title[:50]}...")
+                            results.append({"title": res_title, "link": link})
+                
                 return results
         except Exception as e:
             self.log(f"Usenet search error: {e}")
@@ -82,8 +111,8 @@ class NewznabScraper:
 
 class SabnzbdClient:
     def __init__(self, url: str, api_key: str, log_func: Callable):
-        self.url = url.rstrip('/')
-        self.api_key = api_key
+        self.url = url.strip().rstrip('/')
+        self.api_key = api_key.strip()
         self.log = log_func
 
     async def add_url(self, nzb_url: str, title: str) -> Optional[str]:
@@ -97,38 +126,42 @@ class SabnzbdClient:
             "output": "json"
         }
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
                 resp = await client.get(f"{self.url}/api", params=params)
                 data = resp.json()
                 if data.get("status") and data.get("nzo_ids"):
                     nzo_id = data["nzo_ids"][0]
                     self.log(f"Sent to SABnzbd. ID: {nzo_id}")
                     return nzo_id
+                self.log(f"SABnzbd add failed: {data}")
         except Exception as e:
             self.log(f"SABnzbd error: {e}")
         return None
 
     async def check_status(self, nzo_id: str) -> str:
         """Returns 'downloading', 'completed', 'failed', or 'unknown'"""
-        params = {"mode": "queue", "nzo_id": nzo_id, "apikey": self.api_key, "output": "json"}
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
                 # 1. Check Queue
-                resp = await client.get(f"{self.url}/api", params=params)
+                resp = await client.get(f"{self.url}/api", params={"mode": "queue", "nzo_id": nzo_id, "apikey": self.api_key, "output": "json"})
                 q_data = resp.json()
-                if q_data.get("queue", {}).get("slots"):
-                    return "downloading"
+                slots = q_data.get("queue", {}).get("slots", [])
+                if slots:
+                    for s in slots:
+                        if s.get("nzo_id") == nzo_id: return "downloading"
                 
                 # 2. Check History
-                params["mode"] = "history"
-                resp = await client.get(f"{self.url}/api", params=params)
+                resp = await client.get(f"{self.url}/api", params={"mode": "history", "nzo_id": nzo_id, "apikey": self.api_key, "output": "json"})
                 h_data = resp.json()
                 slots = h_data.get("history", {}).get("slots", [])
                 if slots:
-                    status = slots[0].get("status", "").lower()
-                    if status == "completed": return "completed"
-                    if "failed" in status: return "failed"
-        except: pass
+                    for s in slots:
+                        if s.get("nzo_id") == nzo_id:
+                            status = s.get("status", "").lower()
+                            if status == "completed": return "completed"
+                            if "failed" in status: return "failed"
+        except Exception as e:
+            self.log(f"SABnzbd status check error: {e}")
         return "unknown"
 
 class MetadataFetcher:
