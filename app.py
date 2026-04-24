@@ -1,4 +1,4 @@
-import asyncio, html as htmllib, os, secrets, sys, time, uuid
+import asyncio, html as htmllib, os, re, secrets, sys, time, uuid
 from pathlib import Path
 import uvicorn
 from typing import Optional
@@ -186,7 +186,7 @@ async def run_background_download(job_id, data):
                         if status in ("completed", "failed", "unknown"):
                             break
                         await asyncio.sleep(5)
-                    flatten_downloads(DOWNLOAD_DIR, log)
+                    flatten_downloads(DOWNLOAD_DIR, lambda _: None)
                     if _library_epubs() - before:
                         break
 
@@ -221,7 +221,7 @@ async def run_background_download(job_id, data):
         log("STOPPING: Job was cancelled.")
         raise
     finally:
-        flatten_downloads(DOWNLOAD_DIR, log)
+        flatten_downloads(DOWNLOAD_DIR, lambda _: None)
         await scraper.stop()
         if job_id in JOBS.jobs:
             if JOBS.jobs[job_id]['status'] == 'running':

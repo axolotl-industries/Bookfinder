@@ -58,10 +58,10 @@
         th, td { text-align: left; padding: 14px 8px; border-bottom: 1px solid var(--row-border); }
         .chk-col { width: 50px; text-align: center; }
         #log { background: var(--log-bg); color: var(--log-text); padding: 15px; border-radius: 10px; height: 400px; overflow-y: auto; font-family: monospace; white-space: pre-wrap; font-size: 13px; border: 1px solid var(--border); }
-        .log-entry { margin-bottom: 8px; animation: slideIn 0.3s ease-out; display: flex; gap: 8px; align-items: flex-start; }
+        .log-entry { margin-bottom: 8px; animation: slideIn 0.3s ease-out; display: flex; gap: 8px; align-items: center; white-space: nowrap; }
         @keyframes slideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
         .log-icon { flex-shrink: 0; width: 18px; text-align: center; }
-        .log-msg { line-height: 1.4; }
+        .log-msg { line-height: 1.4; overflow: hidden; text-overflow: ellipsis; }
         
         .progress-container { background: var(--border); border-radius: 10px; height: 8px; margin: 15px 0; overflow: hidden; display: none; }
         #progress-bar { height: 100%; width: 0%; background: var(--primary); transition: width 0.4s ease; }
@@ -227,6 +227,7 @@
                 entry.className = 'log-entry';
                 
                 let icon = "⚙️", color = "inherit", weight = "normal";
+                let hideEntry = false;
                 
                 if (msg.startsWith("SUCCESS:")) {
                     icon = "✅"; color = "#34c759"; weight = "bold";
@@ -242,7 +243,14 @@
                     icon = "🌐";
                 } else if (msg.startsWith("STOPPING") || msg === "JOB_CANCELLED_BY_USER") {
                     icon = "⚠️"; color = "#ffcc00";
+                } else if (msg === "JOB_COMPLETE" || msg.startsWith("Initializing") || msg.startsWith("Added to")) {
+                    icon = ""; // Hide icon for these
+                } else {
+                    // Hide any other technical noise (like file moves)
+                    hideEntry = true;
                 }
+
+                if (hideEntry) return;
 
                 if (totalSelected > 0) {
                     const pct = Math.min(100, (booksDone / totalSelected) * 100);

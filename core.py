@@ -291,7 +291,6 @@ class NewznabScraper:
             link = item.get("enclosure") or item.get("link") or ""
             link = link.replace("&amp;", "&")
             if link:
-                self.log(f"Found match: {res_title[:50]}...")
                 results.append({"title": res_title, "link": link, "size": size})
         return results
 
