@@ -58,6 +58,15 @@
         th, td { text-align: left; padding: 14px 8px; border-bottom: 1px solid var(--row-border); }
         .chk-col { width: 50px; text-align: center; }
         #log { background: var(--log-bg); color: var(--log-text); padding: 15px; border-radius: 10px; height: 400px; overflow-y: auto; font-family: monospace; white-space: pre-wrap; font-size: 13px; border: 1px solid var(--border); }
+        .log-entry { margin-bottom: 8px; animation: slideIn 0.3s ease-out; display: flex; gap: 8px; align-items: flex-start; }
+        @keyframes slideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .log-icon { flex-shrink: 0; width: 18px; text-align: center; }
+        .log-msg { line-height: 1.4; }
+        
+        .progress-container { background: var(--border); border-radius: 10px; height: 8px; margin: 15px 0; overflow: hidden; display: none; }
+        #progress-bar { height: 100%; width: 0%; background: var(--primary); transition: width 0.4s ease; }
+        .progress-text { font-size: 12px; color: var(--text-secondary); text-align: right; margin-bottom: 4px; display: none; }
+
         .spinner { display: inline-block; width: 20px; height: 20px; border: 3px solid rgba(255,255,255,.3); border-radius: 50%; border-top-color: #fff; animation: spin 1s ease-in-out infinite; margin-right: 10px; vertical-align: middle; }
         @keyframes spin { to { transform: rotate(360deg); } }
         .settings-link { text-align: right; margin-bottom: 10px; display: flex; justify-content: flex-end; gap: 16px; }
@@ -95,7 +104,9 @@
     </div>
 
     <div id="log-card" class="card" style="display:none;">
-        <h3>Log</h3>
+        <h3>Job Progress</h3>
+        <div class="progress-text" id="progress-text">0 / 0 books</div>
+        <div class="progress-container" style="display: block;"><div id="progress-bar"></div></div>
         <div id="log"></div>
     </div>
 
@@ -170,13 +181,22 @@
 
         function toggleAll(m) { document.querySelectorAll('.book-chk').forEach(c => c.checked = m.checked); }
 
+        let totalSelected = 0, booksDone = 0;
+
         async function startDownload() {
             const idxs = Array.from(document.querySelectorAll('.book-chk:checked')).map(c => parseInt(c.dataset.i));
             if(!idxs.length) return alert("Select books first.");
+            
+            totalSelected = idxs.length;
+            booksDone = 0;
+            document.getElementById('progress-bar').style.width = '0%';
+            document.getElementById('progress-text').innerText = `0 / ${totalSelected} books`;
+            document.getElementById('progress-text').style.display = 'block';
+
             document.getElementById('log-card').style.display = 'block';
             document.getElementById('download-btn').disabled = true;
             document.getElementById('stop-btn').style.display = 'block';
-            document.getElementById('log').innerHTML = "Initializing job...\n";
+            document.getElementById('log').innerHTML = "";
             logIndex = 0;
 
             const res = await apiFetch('/start_job', { method: 'POST', headers: {'Content-Type':'application/json'},
@@ -198,14 +218,43 @@
         function connect(job_id) {
             const ev = new EventSource(`/stream/${job_id}?last_idx=${logIndex}`);
             const logDiv = document.getElementById('log');
+            
             ev.onmessage = (e) => {
-                const line = document.createElement('div');
-                const msg = e.data; line.textContent = msg;
-                if(msg.startsWith("SUCCESS:")) line.style.color = "#34c759";
-                if(msg.startsWith("FAILED:") || msg === "JOB_CANCELLED_BY_USER") line.style.color = "#ff453a";
-                if(msg.startsWith("PROCESSING:")) { line.style.color = "#0a84ff"; line.style.marginTop = "10px"; line.style.fontWeight = "bold"; }
-                logDiv.appendChild(line); logDiv.scrollTop = logDiv.scrollHeight;
+                const msg = e.data;
+                if (msg === ": heartbeat") return;
+                
+                const entry = document.createElement('div');
+                entry.className = 'log-entry';
+                
+                let icon = "⚙️", color = "inherit", weight = "normal";
+                
+                if (msg.startsWith("SUCCESS:")) {
+                    icon = "✅"; color = "#34c759"; weight = "bold";
+                    booksDone++;
+                } else if (msg.startsWith("FAILED:")) {
+                    icon = "❌"; color = "#ff453a"; weight = "bold";
+                    booksDone++;
+                } else if (msg.startsWith("Searching for")) {
+                    icon = "🔍"; color = "#0a84ff";
+                } else if (msg.includes("download queue")) {
+                    icon = "📥";
+                } else if (msg.includes("mirror")) {
+                    icon = "🌐";
+                } else if (msg.startsWith("STOPPING") || msg === "JOB_CANCELLED_BY_USER") {
+                    icon = "⚠️"; color = "#ffcc00";
+                }
+
+                if (totalSelected > 0) {
+                    const pct = Math.min(100, (booksDone / totalSelected) * 100);
+                    document.getElementById('progress-bar').style.width = `${pct}%`;
+                    document.getElementById('progress-text').innerText = `${booksDone} / ${totalSelected} books`;
+                }
+
+                entry.innerHTML = `<span class="log-icon">${icon}</span><span class="log-msg" style="color:${color}; font-weight:${weight}">${msg}</span>`;
+                logDiv.appendChild(entry);
+                logDiv.scrollTop = logDiv.scrollHeight;
                 logIndex++;
+                
                 if(msg === "JOB_COMPLETE") {
                     ev.close();
                     document.getElementById('download-btn').disabled = false;
