@@ -479,6 +479,13 @@ class WikiBibliography:
         re.compile(r'\bshort[\s\-]?story collections?\b', re.I),
         re.compile(r'\bstory collections?\b', re.I),
         re.compile(r'\bfiction collections?\b', re.I),
+        # Catch author pages that use a flat "Bibliography" section with series subsections
+        # (e.g. Sarah J. Maas). The stack logic lets series-named sub-headings inherit from here.
+        re.compile(r'\bbibliograph(y|ies)\b', re.I),
+        re.compile(r'\bpublished works\b', re.I),
+        re.compile(r'\bnotable works\b', re.I),
+        re.compile(r'\bselected works\b', re.I),
+        re.compile(r'\bmain works\b', re.I),
     )
 
     UNWANTED = (
@@ -491,24 +498,30 @@ class WikiBibliography:
         re.compile(r'\bshort fiction\b(?! collection)', re.I),
         re.compile(r"\bchildren's\b", re.I),
         re.compile(r'\bmemoir\b', re.I),
-        re.compile(r'\bbiography\b', re.I),
+        re.compile(r'\bbiograph(y|ies) of\b', re.I),  # more specific than 'biography' to
+        re.compile(r'\babout the author\b', re.I),    # avoid killing "Bibliography"
         re.compile(r'\bcontributions?\b', re.I),
         re.compile(r'\bforewor[dt]s?\b', re.I),
         re.compile(r'\buncollected\b', re.I),
         re.compile(r'\bsee also\b', re.I),
         re.compile(r'\breferences?\b', re.I),
+        re.compile(r'\bworks cited\b', re.I),
         re.compile(r'\bexternal links?\b', re.I),
         re.compile(r'\bfurther reading\b', re.I),
         re.compile(r'\bnotes?\b', re.I),
         re.compile(r'\badaptations?\b', re.I),
         re.compile(r'\bfilmography\b', re.I),
+        re.compile(r'\bdiscography\b', re.I),
+        re.compile(r'\bawards?\b', re.I),
     )
 
     def __init__(self, client: httpx.Client):
         self.client = client
 
-    def fetch(self, author_name: str) -> Optional[set]:
-        """Return a set of normalized titles, or None if Wikipedia isn't usable for this author."""
+    def fetch(self, author_name: str) -> Optional[Dict[str, str]]:
+        """Return a dict mapping normalized titles to their display form, or None if
+        Wikipedia isn't usable for this author.
+        """
         if not author_name:
             return None
         for query in (f"{author_name} bibliography", author_name):
@@ -547,10 +560,10 @@ class WikiBibliography:
         except Exception:
             return None
 
-    def _extract(self, html: str) -> set:
+    def _extract(self, html: str) -> Dict[str, str]:
         soup = BeautifulSoup(html, 'html.parser')
         content = soup.find('div', class_='mw-parser-output') or soup
-        titles: set = set()
+        titles: Dict[str, str] = {}
         # Stack of (heading_level, wanted) — enables nested sections to inherit.
         stack: List[Tuple[int, bool]] = []
 
@@ -585,10 +598,18 @@ class WikiBibliography:
                     continue
                 if el.find_parent('table', class_='infobox'):
                     continue
+                # Only accept italics inside list items, table cells, or definition lists —
+                # random italicized phrases in prose paragraphs aren't book titles.
+                parents = {p.name for p in el.parents if p.name}
+                if not (parents & {'li', 'td', 'th', 'dd'}):
+                    continue
                 raw = el.get_text(' ', strip=True)
-                norm = normalize_text(raw)
-                if norm and len(norm) >= 2:
-                    titles.add(norm)
+                # Strip Wikipedia disambiguation suffixes like "Carrie (novel)".
+                display = re.sub(r'\s*\((?:novel|book|novella|short story|collection|anthology|series)\)\s*$',
+                                 '', raw, flags=re.I).strip()
+                norm = normalize_text(display)
+                if norm and len(norm) >= 2 and norm not in titles:
+                    titles[norm] = display
 
         return titles
 
@@ -632,14 +653,23 @@ class MetadataFetcher:
         """
         raw = self._fetch_ol_works(author_id)
 
-        wiki_titles: Optional[set] = None
+        wiki_titles: Optional[Dict[str, str]] = None
         try:
             wiki_titles = WikiBibliography(self.client).fetch(author_name)
         except Exception:
             wiki_titles = None
 
         if wiki_titles:
-            books = [b for b in raw if normalize_text(b["title"]) in wiki_titles]
+            # Wikipedia is the authority for bibliography membership. For each Wiki entry,
+            # prefer the OL record (gives us publication year) but fall back to a bare
+            # title if OL is missing it under this author key.
+            ol_by_norm = {normalize_text(b["title"]): b for b in raw}
+            books = []
+            for wnorm, wdisplay in wiki_titles.items():
+                if wnorm in ol_by_norm:
+                    books.append(ol_by_norm[wnorm])
+                else:
+                    books.append({"title": wdisplay, "year": None, "isbns": []})
         else:
             books = [b for b in raw if self._passes_ol_filter(b)]
 
