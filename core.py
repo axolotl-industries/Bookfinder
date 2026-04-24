@@ -69,12 +69,13 @@ class NewznabScraper:
         }
         
         url = f"{self.api_url}/api"
-        self.log(f"DEBUG URL: {url}?{'&'.join([f'{k}={v}' for k,v in params.items()])}")
+        # Explicitly quote the query for indexer compatibility
+        params["q"] = f'"{author} {title}"'
         
         try:
-            async with httpx.AsyncClient(timeout=15.0, verify=False, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=15.0, verify=False, follow_redirects=True, headers={"User-Agent": UA}) as client:
                 resp = await client.get(url, params=params)
-                self.log(f"DEBUG RESPONSE (First 500 chars): {resp.text[:500]}")
+                self.log(f"DEBUG RESPONSE (First 1000 chars): {resp.text[:1000]}")
                 
                 if resp.status_code != 200:
                     self.log(f"Usenet API error: {resp.status_code}")
@@ -172,7 +173,7 @@ class SabnzbdClient:
             "output": "json"
         }
         try:
-            async with httpx.AsyncClient(timeout=15.0, verify=False, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=15.0, verify=False, follow_redirects=True, headers={"User-Agent": UA}) as client:
                 resp = await client.get(f"{self.url}/api", params=params)
                 data = resp.json()
                 if data.get("status") and data.get("nzo_ids"):
@@ -188,7 +189,7 @@ class SabnzbdClient:
     async def check_status(self, nzo_id: str) -> str:
         """Returns 'downloading', 'completed', 'failed', or 'unknown'"""
         try:
-            async with httpx.AsyncClient(timeout=10.0, verify=False, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=10.0, verify=False, follow_redirects=True, headers={"User-Agent": UA}) as client:
                 # 1. Check Queue
                 resp = await client.get(f"{self.url}/api", params={"mode": "queue", "nzo_id": nzo_id, "apikey": self.api_key, "output": "json"})
                 q_data = resp.json()
