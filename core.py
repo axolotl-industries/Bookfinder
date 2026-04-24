@@ -7,7 +7,9 @@ import ssl
 import ebookmeta
 import zipfile
 import sys
+import shutil
 import xml.etree.ElementTree as ET
+from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Generator, Callable
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, Browser
@@ -26,9 +28,53 @@ def normalize_text(text: str) -> str:
     t = re.sub(r'^the\s+|^a\s+|^an\s+', '', t)
     # Clean up common cruft suffixes
     t = re.sub(r'\[\d+/\d+\]|\(part \d+\)', '', t)
+    # Make & and "and" equivalent for matching (so "Nightmares & Dreamscapes" == "Nightmares and Dreamscapes")
+    t = t.replace('&', ' and ')
     # Remove remaining non-alphanumeric (except spaces)
     t = re.sub(r'[^\w\s]', '', t)
     return " ".join(t.split())
+
+
+def flatten_downloads(base_dir: str, log: Callable = print) -> None:
+    """Make base_dir a flat directory containing only .epub files.
+
+    Moves every nested .epub up to base_dir (disambiguating on collision), then
+    deletes everything else — subfolders, .nfo, .mobi, .mp4, cover images, whatever
+    SABnzbd or a multi-file NZB left behind.
+    """
+    base = Path(base_dir)
+    if not base.is_dir():
+        return
+
+    for epub in base.rglob('*.epub'):
+        if epub.parent == base:
+            continue
+        dest = base / epub.name
+        if dest.exists():
+            stem, suffix = epub.stem, epub.suffix
+            i = 1
+            while True:
+                candidate = base / f"{stem} ({i}){suffix}"
+                if not candidate.exists():
+                    dest = candidate
+                    break
+                i += 1
+        try:
+            shutil.move(str(epub), str(dest))
+            log(f"Moved {epub.name} to downloads root")
+        except Exception as e:
+            log(f"Failed to move {epub.name}: {e}")
+
+    for item in base.iterdir():
+        try:
+            if item.is_dir():
+                shutil.rmtree(item)
+                log(f"Removed folder: {item.name}")
+            elif item.suffix.lower() != '.epub':
+                item.unlink()
+                log(f"Removed non-EPUB: {item.name}")
+        except Exception as e:
+            log(f"Failed to clean {item.name}: {e}")
 
 def create_robust_ssl_context():
     try:
@@ -48,7 +94,26 @@ async def resolve_annas_domain(log_func: Callable) -> str:
         except: continue
     return "https://annas-archive.gl"
 
+MAX_EPUB_BYTES = 50 * 1024 * 1024  # 50MB — EPUBs are small; anything bigger is a movie/audiobook/rar pack.
+
+
 class NewznabScraper:
+    # Hard rejects — release title declares a format we don't want, so the download would
+    # be wasted. If the title also says EPUB, _looks_like_epub still keeps it.
+    _NON_EPUB_MARKERS = (
+        # Video
+        " mp4", " avi", " mkv", " m4v", " wmv", ".mp4", ".avi", ".mkv",
+        " hdtv", " 1080p", " 720p", " 2160p", " x264", " x265", " h264", " h265",
+        " bluray", " blu-ray", " dvdrip", " bdrip", " webrip", " web-dl", " hdrip",
+        # Audio
+        " mp3", " m4a", " m4b", " flac", " wav", " ogg", ".mp3", ".m4b", ".flac",
+        " audiobook", " audio book", " audiobk",
+    )
+    # Soft rejects — other book formats explicitly declared without EPUB also present.
+    _OTHER_EBOOK_MARKERS = (
+        " mobi", " azw3", " azw", " pdf", " rtf", ".mobi", ".azw3", ".azw", ".pdf",
+    )
+
     def __init__(self, api_url: str, api_key: str, log_func: Callable):
         # Normalise to the indexer root. Strip query string, trailing slashes, and a trailing /api.
         base = api_url.strip().split('?')[0].rstrip('/')
@@ -67,9 +132,12 @@ class NewznabScraper:
         # Newznab standard is an unquoted, space-separated query. Literal quotes around the phrase
         # cause many indexers (incl. most of Prowlarr's passthroughs) to treat it as an exact match
         # and return nothing — or to respond with an error page.
+        #
+        # cat=7020 restricts to Books > EBook. The previous "7000,7020,8010" pulled in audiobooks,
+        # magazines, comics, and the "Other > Misc" catch-all that had MP4/AVI releases.
         params = {
             "t": "search",
-            "cat": "7000,7020,8010",
+            "cat": "7020",
             "q": f"{author} {title}",
             "apikey": self.api_key,
         }
@@ -128,17 +196,39 @@ class NewznabScraper:
                 l = item.findtext('link', default='') or ''
                 enc = item.find('enclosure')
                 enc_url = enc.attrib.get('url') if enc is not None else None
-                items.append({"title": t.strip(), "link": l.strip(), "enclosure": enc_url})
+                size = 0
+                if enc is not None:
+                    try: size = int(enc.attrib.get('length') or 0)
+                    except ValueError: size = 0
+                # Newznab also exposes size as <newznab:attr name="size" value="..."/>
+                if not size:
+                    for child in item:
+                        tag = child.tag.split('}')[-1]
+                        if tag == 'attr' and child.attrib.get('name') == 'size':
+                            try: size = int(child.attrib.get('value') or 0)
+                            except ValueError: pass
+                            if size: break
+                items.append({"title": t.strip(), "link": l.strip(), "enclosure": enc_url, "size": size})
         except ET.ParseError as e:
             self.log(f"XML parse error: {e}; falling back to regex extraction")
             for block in re.findall(r'<item[^>]*>(.*?)</item>', body, re.I | re.S):
                 t = re.search(r'<title[^>]*>\s*(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?\s*</title>', block, re.I | re.S)
                 l = re.search(r'<link[^>]*>\s*(.*?)\s*</link>', block, re.I | re.S)
                 e_url = re.search(r'<enclosure[^>]+url=["\'](.*?)["\']', block, re.I | re.S)
+                e_size = re.search(r'<enclosure[^>]+length=["\'](\d+)["\']', block, re.I | re.S)
+                attr_size = re.search(r'<newznab:attr\s+name=["\']size["\']\s+value=["\'](\d+)["\']', block, re.I)
+                size = 0
+                if e_size:
+                    try: size = int(e_size.group(1))
+                    except ValueError: size = 0
+                if not size and attr_size:
+                    try: size = int(attr_size.group(1))
+                    except ValueError: size = 0
                 items.append({
                     "title": (t.group(1).strip() if t else ''),
                     "link": (l.group(1).strip() if l else ''),
                     "enclosure": (e_url.group(1).strip() if e_url else None),
+                    "size": size,
                 })
         return items
 
@@ -154,21 +244,30 @@ class NewznabScraper:
         for i in raw:
             enc = i.get("enclosure")
             enc_url = None
+            enc_size = 0
             if isinstance(enc, dict):
                 enc_url = enc.get("@url") or enc.get("url")
+                try: enc_size = int(enc.get("@length") or enc.get("length") or 0)
+                except (ValueError, TypeError): enc_size = 0
             elif isinstance(enc, list):
                 for e in enc:
                     if isinstance(e, dict):
                         enc_url = e.get("@url") or e.get("url")
+                        try: enc_size = int(e.get("@length") or e.get("length") or 0)
+                        except (ValueError, TypeError): enc_size = 0
                         if enc_url:
                             break
-            items.append({"title": i.get("title", ""), "link": i.get("link", ""), "enclosure": enc_url})
+            if not enc_size:
+                try: enc_size = int(i.get("size") or 0)
+                except (ValueError, TypeError): enc_size = 0
+            items.append({"title": i.get("title", ""), "link": i.get("link", ""), "enclosure": enc_url, "size": enc_size})
         return items
 
     def _match(self, items: List[Dict], author: str, title: str) -> List[Dict]:
         results = []
         norm_title = normalize_text(title)
         author_parts = [p for p in normalize_text(author).split() if len(p) > 2]
+        skipped = {"format": 0, "size": 0}
         for item in items:
             res_title = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', item.get("title", ""))
             norm_res_title = normalize_text(res_title)
@@ -176,12 +275,42 @@ class NewznabScraper:
             author_match = any(p in norm_res_title for p in author_parts) if author_parts else True
             if not (title_match and author_match):
                 continue
+            if not self._looks_like_epub(res_title):
+                skipped["format"] += 1
+                continue
+            size = int(item.get("size") or 0)
+            if size and size > MAX_EPUB_BYTES:
+                skipped["size"] += 1
+                continue
             link = item.get("enclosure") or item.get("link") or ""
             link = link.replace("&amp;", "&")
             if link:
-                self.log(f"Found Usenet match: {res_title[:50]}...")
-                results.append({"title": res_title, "link": link})
+                self.log(f"Found Usenet match: {res_title[:50]}... ({_fmt_size(size)})")
+                results.append({"title": res_title, "link": link, "size": size})
+        if skipped["format"] or skipped["size"]:
+            self.log(f"Usenet skipped {skipped['format']} non-EPUB / {skipped['size']} oversized matches")
         return results
+
+    @classmethod
+    def _looks_like_epub(cls, title: str) -> bool:
+        t = f" {title.lower()} "
+        if "epub" in t:
+            return True
+        if any(m in t for m in cls._NON_EPUB_MARKERS):
+            return False
+        if any(m in t for m in cls._OTHER_EBOOK_MARKERS):
+            return False
+        # No format declared — ambiguous but plausible; let it through.
+        return True
+
+
+def _fmt_size(n: int) -> str:
+    if not n: return "?"
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.1f}{unit}" if unit != "B" else f"{n}B"
+        n /= 1024
+    return f"{n:.1f}GB"
 
 class EmbyAuth:
     """Authenticates users against an Emby server using /Users/AuthenticateByName.
@@ -333,6 +462,137 @@ _NON_ENG_ARTICLE_RE = re.compile(
 _NON_LATIN_RE = re.compile(r"[Ѐ-ӿ一-鿿぀-ヿ؀-ۿ֐-׿]")
 
 
+class WikiBibliography:
+    """Pulls novel and short-story-collection titles from an author's Wikipedia page.
+
+    The MediaWiki API gets us HTML we can walk. We track section headings with a simple
+    level-stack so that sub-sections inherit their parent's "wanted" state — the Dark
+    Tower books under "Novels > The Dark Tower series" still count as novels, but
+    a "Non-fiction" h2 cleanly turns the filter off until the next wanted heading.
+    """
+
+    API = "https://en.wikipedia.org/w/api.php"
+
+    WANTED = (
+        re.compile(r'\bnovels?\b', re.I),
+        re.compile(r'\bnovellas?\b', re.I),
+        re.compile(r'\bshort[\s\-]?story collections?\b', re.I),
+        re.compile(r'\bstory collections?\b', re.I),
+        re.compile(r'\bfiction collections?\b', re.I),
+    )
+
+    UNWANTED = (
+        re.compile(r'\bnon[\s\-]?fiction\b', re.I),
+        re.compile(r'\banthologies?\s+(?:edited|contributed)\b', re.I),
+        re.compile(r'\bas\s+editor\b', re.I),
+        re.compile(r'\bscreenplays?\b', re.I),
+        re.compile(r'\bessays?\b', re.I),
+        re.compile(r'\bpoetry\b', re.I),
+        re.compile(r'\bshort fiction\b(?! collection)', re.I),
+        re.compile(r"\bchildren's\b", re.I),
+        re.compile(r'\bmemoir\b', re.I),
+        re.compile(r'\bbiography\b', re.I),
+        re.compile(r'\bcontributions?\b', re.I),
+        re.compile(r'\bforewor[dt]s?\b', re.I),
+        re.compile(r'\buncollected\b', re.I),
+        re.compile(r'\bsee also\b', re.I),
+        re.compile(r'\breferences?\b', re.I),
+        re.compile(r'\bexternal links?\b', re.I),
+        re.compile(r'\bfurther reading\b', re.I),
+        re.compile(r'\bnotes?\b', re.I),
+        re.compile(r'\badaptations?\b', re.I),
+        re.compile(r'\bfilmography\b', re.I),
+    )
+
+    def __init__(self, client: httpx.Client):
+        self.client = client
+
+    def fetch(self, author_name: str) -> Optional[set]:
+        """Return a set of normalized titles, or None if Wikipedia isn't usable for this author."""
+        if not author_name:
+            return None
+        for query in (f"{author_name} bibliography", author_name):
+            page = self._search(query)
+            if not page:
+                continue
+            html = self._parse_page(page)
+            if not html:
+                continue
+            titles = self._extract(html)
+            if titles:
+                return titles
+        return None
+
+    def _search(self, query: str) -> Optional[str]:
+        try:
+            resp = self.client.get(self.API, params={
+                "action": "query", "list": "search", "srsearch": query,
+                "format": "json", "srlimit": 1,
+            })
+            if resp.status_code != 200:
+                return None
+            hits = resp.json().get("query", {}).get("search", [])
+            return hits[0]["title"] if hits else None
+        except Exception:
+            return None
+
+    def _parse_page(self, page_title: str) -> Optional[str]:
+        try:
+            resp = self.client.get(self.API, params={
+                "action": "parse", "page": page_title, "format": "json", "prop": "text",
+            })
+            if resp.status_code != 200:
+                return None
+            return resp.json().get("parse", {}).get("text", {}).get("*")
+        except Exception:
+            return None
+
+    def _extract(self, html: str) -> set:
+        soup = BeautifulSoup(html, 'html.parser')
+        content = soup.find('div', class_='mw-parser-output') or soup
+        titles: set = set()
+        # Stack of (heading_level, wanted) — enables nested sections to inherit.
+        stack: List[Tuple[int, bool]] = []
+
+        for el in content.find_all(True, recursive=True):
+            if el.name in ('h2', 'h3', 'h4', 'h5', 'h6'):
+                level = int(el.name[1])
+                text = el.get_text(' ', strip=True)
+                text = re.sub(r'\[\s*edit\s*\]', '', text, flags=re.I).strip()
+                wanted = any(p.search(text) for p in self.WANTED)
+                unwanted = any(p.search(text) for p in self.UNWANTED)
+
+                while stack and stack[-1][0] >= level:
+                    stack.pop()
+
+                if wanted and not unwanted:
+                    stack.append((level, True))
+                elif unwanted:
+                    stack.append((level, False))
+                else:
+                    parent_wanted = stack[-1][1] if stack else False
+                    stack.append((level, parent_wanted))
+                continue
+
+            if not (stack and stack[-1][1]):
+                continue
+
+            if el.name in ('i', 'em', 'cite'):
+                # Skip citations, hatnotes, and infobox content — those aren't bibliography entries.
+                if el.find_parent('sup'):
+                    continue
+                if el.find_parent(class_='hatnote'):
+                    continue
+                if el.find_parent('table', class_='infobox'):
+                    continue
+                raw = el.get_text(' ', strip=True)
+                norm = normalize_text(raw)
+                if norm and len(norm) >= 2:
+                    titles.add(norm)
+
+        return titles
+
+
 class MetadataFetcher:
     def __init__(self):
         self.client = httpx.Client(timeout=20.0, verify=False, headers={"User-Agent": UA})
@@ -360,17 +620,57 @@ class MetadataFetcher:
             return detailed_results
         except: return []
 
-    def get_author_books(self, author_id: str, query: Optional[str] = None) -> List[Dict]:
+    def get_author_books(self, author_id: str, author_name: str = "", query: Optional[str] = None) -> List[Dict]:
         """Return the author's novels and short story collections, English only.
 
-        Uses the work-level /authors/{id}/works.json endpoint (one entry per canonical work),
-        not the edition-level /search.json (which multiplies into every translation and reprint).
+        Two-stage: pull every work OpenLibrary lists for this author, then filter.
+        Wikipedia's bibliography page is the preferred filter — if we can find one
+        with recognisable "Novels" / "Short story collections" headings, only works
+        whose normalized title appears under those sections are kept. For obscure
+        authors (no Wikipedia page, or one we can't parse), fall back to filtering
+        on OpenLibrary's own subject tags and an English-title heuristic.
         """
-        books: List[Dict] = []
-        seen = set()
+        raw = self._fetch_ol_works(author_id)
+
+        wiki_titles: Optional[set] = None
+        try:
+            wiki_titles = WikiBibliography(self.client).fetch(author_name)
+        except Exception:
+            wiki_titles = None
+
+        if wiki_titles:
+            books = [b for b in raw if normalize_text(b["title"]) in wiki_titles]
+        else:
+            books = [b for b in raw if self._passes_ol_filter(b)]
+
+        if query:
+            q = normalize_text(query)
+            books = [b for b in books if q in normalize_text(b["title"])]
+
+        # Dedupe by normalized title; prefer the entry that has a year.
+        best: Dict[str, Dict] = {}
+        for b in books:
+            norm = normalize_text(b["title"])
+            if not norm:
+                continue
+            cur = best.get(norm)
+            if cur is None:
+                best[norm] = b
+            elif cur.get("year") is None and b.get("year") is not None:
+                best[norm] = b
+            elif b.get("year") and cur.get("year") and b["year"] < cur["year"]:
+                best[norm] = b
+
+        result = sorted(best.values(), key=lambda x: (x.get("year") or 9999, x.get("title", "")))
+        for b in result:
+            b.pop("_subjects", None)
+        return result
+
+    def _fetch_ol_works(self, author_id: str) -> List[Dict]:
+        """Fetch raw works for this author from OpenLibrary, no filtering yet."""
         key = author_id.split('/')[-1]  # accept either "OL123A" or "/authors/OL123A"
         offset, limit = 0, 200
-
+        books: List[Dict] = []
         while True:
             try:
                 resp = self.client.get(
@@ -384,35 +684,29 @@ class MetadataFetcher:
                 break
             if not entries:
                 break
-
             for work in entries:
                 title = (work.get("title") or "").strip()
-                if not title or _CRUFT_TITLE_RE.search(title):
+                if not title:
                     continue
-                if not self._is_english_title(title):
-                    continue
-                subjects = [str(s).lower() for s in (work.get("subjects") or [])]
-                if not self._is_fiction_work(subjects):
-                    continue
-
-                norm = normalize_text(title)
-                if not norm or norm in seen:
-                    continue
-                if query and normalize_text(query) not in norm:
-                    continue
-                seen.add(norm)
-
                 books.append({
                     "title": title,
                     "year": self._extract_year(work.get("first_publish_date")),
                     "isbns": [],  # ISBNs live on editions; the downloader falls back to author+title.
+                    "_subjects": [str(s).lower() for s in (work.get("subjects") or [])],
                 })
-
             if len(entries) < limit:
                 break
             offset += limit
+        return books
 
-        return sorted(books, key=lambda x: (x.get("year") or 9999, x.get("title", "")))
+    @classmethod
+    def _passes_ol_filter(cls, book: Dict) -> bool:
+        title = book["title"]
+        if _CRUFT_TITLE_RE.search(title):
+            return False
+        if not cls._is_english_title(title):
+            return False
+        return cls._is_fiction_work(book.get("_subjects") or [])
 
     @staticmethod
     def _is_fiction_work(subjects: List[str]) -> bool:
