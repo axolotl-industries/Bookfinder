@@ -167,10 +167,12 @@ class NewznabScraper:
 
         try:
             async with httpx.AsyncClient(timeout=15.0, verify=False, follow_redirects=True, headers=headers) as client:
-                resp = await client.get(url, params=params)
+                req = client.build_request("GET", url, params=params)
+                self.log(f"Requesting Prowlarr URL: {req.url}")
+                resp = await client.send(req)
 
                 if resp.status_code != 200:
-                    self.log(f"Usenet API error: HTTP {resp.status_code}")
+                    self.log(f"Usenet API error: HTTP {resp.status_code} - Body: {resp.text[:200]}")
                     return []
 
                 ctype = resp.headers.get("Content-Type", "").lower()
