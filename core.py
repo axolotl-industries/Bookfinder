@@ -72,11 +72,23 @@ class NewznabScraper:
                     self.log(f"Usenet API error: {resp.status_code}")
                     return []
                 
-                data = resp.json()
-                # Handle various Newznab JSON structures
-                items = data.get("item", [])
-                if not items and "channel" in data:
-                    items = data.get("channel", {}).get("item", [])
+                # Try JSON first
+                items = []
+                try:
+                    data = resp.json()
+                    items = data.get("item", [])
+                    if not items and "channel" in data:
+                        items = data.get("channel", {}).get("item", [])
+                except Exception:
+                    # Fallback to XML parsing if JSON fails
+                    self.log("Usenet returned non-JSON, attempting XML parse...")
+                    soup = BeautifulSoup(resp.text, 'xml')
+                    for item in soup.find_all('item'):
+                        items.append({
+                            "title": item.title.get_text() if item.title else "",
+                            "link": item.link.get_text() if item.link else "",
+                            "enclosure": {"@url": item.find('enclosure')['url']} if item.find('enclosure') else None
+                        })
                 
                 if not isinstance(items, list): items = [items] if items else []
 
@@ -105,6 +117,7 @@ class NewznabScraper:
                             results.append({"title": res_title, "link": link})
                 
                 return results
+        except asyncio.CancelledError: raise
         except Exception as e:
             self.log(f"Usenet search error: {e}")
             return []
