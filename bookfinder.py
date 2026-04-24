@@ -94,12 +94,15 @@ class MetadataFetcher:
     def normalize_title(self, title: str) -> str:
         if not title: return ""
         t = title.lower()
+        # Replace dots, underscores, and common punctuation with spaces BEFORE stripping
+        t = re.sub(r'[\._\-]', ' ', t)
         # Strip subtitles and parentheses
         t = t.split(':')[0].split('(')[0]
         # Clean up common prefixes
         t = re.sub(r'^the\s+|^a\s+|^an\s+', '', t)
-        # Clean up common cruft suffixes that interfere with deduplication
+        # Clean up common cruft suffixes
         t = re.sub(r'\[\d+/\d+\]|\(part \d+\)', '', t)
+        # Remove remaining non-alphanumeric (except spaces)
         t = re.sub(r'[^\w\s]', '', t)
         return " ".join(t.split())
 

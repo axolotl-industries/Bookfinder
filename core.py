@@ -16,12 +16,15 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 def normalize_text(text: str) -> str:
     if not text: return ""
     t = text.lower()
+    # Replace dots, underscores, and common punctuation with spaces BEFORE stripping
+    t = re.sub(r'[\._\-]', ' ', t)
     # Strip subtitles and parentheses
     t = t.split(':')[0].split('(')[0]
     # Clean up common prefixes
     t = re.sub(r'^the\s+|^a\s+|^an\s+', '', t)
-    # Clean up common cruft suffixes that interfere with deduplication
+    # Clean up common cruft suffixes
     t = re.sub(r'\[\d+/\d+\]|\(part \d+\)', '', t)
+    # Remove remaining non-alphanumeric (except spaces)
     t = re.sub(r'[^\w\s]', '', t)
     return " ".join(t.split())
 
@@ -82,13 +85,18 @@ class NewznabScraper:
                 except Exception:
                     # Fallback to XML parsing if JSON fails
                     self.log("Usenet returned non-JSON, attempting XML parse...")
-                    soup = BeautifulSoup(resp.text, 'xml')
+                    soup = BeautifulSoup(resp.text, 'html.parser')
                     for item in soup.find_all('item'):
+                        title_tag = item.find('title')
+                        link_tag = item.find('link')
+                        enclosure_tag = item.find('enclosure')
+                        
                         items.append({
-                            "title": item.title.get_text() if item.title else "",
-                            "link": item.link.get_text() if item.link else "",
-                            "enclosure": {"@url": item.find('enclosure')['url']} if item.find('enclosure') else None
+                            "title": title_tag.get_text() if title_tag else "",
+                            "link": link_tag.get_text() if link_tag else "",
+                            "enclosure": {"@url": enclosure_tag['url']} if (enclosure_tag and enclosure_tag.has_attr('url')) else None
                         })
+                    self.log(f"XML parse found {len(items)} items")
                 
                 if not isinstance(items, list): items = [items] if items else []
 
