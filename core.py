@@ -456,9 +456,12 @@ _CRUFT_TITLE_RE = re.compile(
     r"\b(box set|trilogy|omnibus|selections|summary|analysis of|study guide|"
     r"companion|trivia|unofficial|vol\.?\s*\d+|volume\s*\d+|issue|magazine|"
     r"year['’]?s best|antholog|notebook|diary|journal|calendar|catalog|"
-    r"textbook|puzzle|brainteaser|crafts?)\b",
+    r"textbook|puzzle|brainteaser|crafts?|curriculum|workbook|teacher['’]?s guide)\b",
     re.I,
 )
+
+# Transliterated titles often have these patterns (common in Hebrew/Russian/etc transliterations)
+_TRANSLITERATED_RE = re.compile(r"([ḳḥṭṣẓ]|^ha-)", re.I)
 
 # Non-English articles that start translated titles (kept to unambiguously-foreign cases).
 _NON_ENG_ARTICLE_RE = re.compile(
@@ -474,7 +477,6 @@ _NON_ENG_ARTICLE_RE = re.compile(
 # Scripts that unambiguously aren't English (Cyrillic, CJK, Hiragana/Katakana, Arabic, Hebrew).
 _NON_LATIN_RE = re.compile(r"[Ѐ-ӿ一-鿿぀-ヿ؀-ۿ֐-׿]")
 
-
 class GoogleBooksBibliography:
     """Enumerates an author's books via the Google Books API.
 
@@ -486,13 +488,13 @@ class GoogleBooksBibliography:
 
     API = "https://www.googleapis.com/books/v1/volumes"
     PAGE_SIZE = 40
-    MAX_PAGES = 10  # 400 volumes is more than any real author's bibliography + editions
+    MAX_PAGES = 25  # Increased to 1000 items (max possible)
 
-    def __init__(self, client: httpx.Client, log: Callable = lambda _: None):
+    def __init__(self, client: httpx.AsyncClient, log: Callable = lambda _: None):
         self.client = client
         self.log = log
 
-    def fetch(self, author_name: str) -> List[Dict]:
+    async def fetch(self, author_name: str) -> List[Dict]:
         """Return a deduped list of the author's English fiction titles with
         year + ISBNs. Empty list if the query yields nothing usable.
         """
@@ -506,7 +508,7 @@ class GoogleBooksBibliography:
 
         for page in range(self.MAX_PAGES):
             try:
-                resp = self.client.get(self.API, params={
+                resp = await self.client.get(self.API, params={
                     "q": f'inauthor:"{author_name}"',
                     "maxResults": self.PAGE_SIZE,
                     "startIndex": page * self.PAGE_SIZE,
@@ -526,7 +528,14 @@ class GoogleBooksBibliography:
             for item in items:
                 vol = item.get("volumeInfo") or {}
                 title = (vol.get("title") or "").strip()
-                if not title or _CRUFT_TITLE_RE.search(title):
+                # Loosen the cruft filter slightly to allow valid titles that might contain 'vol' or 'volume'
+                if not title or _CRUFT_TITLE_RE.search(title) or _TRANSLITERATED_RE.search(title):
+                    if not (("vol" in title.lower() or "volume" in title.lower()) and ":" in title):
+                        continue
+                
+                # Filter out obvious non-authoritative publishers (curriculum, study guides)
+                publisher = (vol.get("publisher") or "").lower()
+                if "moving beyond the page" in publisher or "bright summaries" in publisher:
                     continue
 
                 # Author match — the inauthor: query is fuzzy and will include
@@ -576,6 +585,7 @@ class GoogleBooksBibliography:
                     existing = seen[norm]
                     if year and (existing.get("year") is None or year < existing["year"]):
                         existing["year"] = year
+                        existing["title"] = title # Prefer title of the earliest edition
                     # Merge ISBNs (keep ISBN-13 first if possible)
                     for i in isbns:
                         if i not in existing["isbns"]:
@@ -595,12 +605,15 @@ class GoogleBooksBibliography:
 
 class MetadataFetcher:
     def __init__(self):
-        self.client = httpx.Client(timeout=20.0, verify=False, headers={"User-Agent": UA})
+        self.client = httpx.AsyncClient(timeout=20.0, verify=False, headers={"User-Agent": UA})
 
-    def search_author(self, name: str) -> List[Dict]:
+    async def aclose(self):
+        await self.client.aclose()
+
+    async def search_author(self, name: str) -> List[Dict]:
         try:
             clean_name = name.replace(".", " ").strip().lower()
-            response = self.client.get(f"https://openlibrary.org/search/authors.json", params={"q": clean_name})
+            response = await self.client.get(f"https://openlibrary.org/search/authors.json", params={"q": clean_name})
             docs = response.json().get("docs", [])
             if not docs: return []
             candidates = sorted(docs[:10], key=lambda x: x.get("work_count", 0), reverse=True)[:5]
@@ -609,7 +622,7 @@ class MetadataFetcher:
                 key = doc["key"]
                 author_data = {"id": key, "name": doc.get("name"), "top_work": doc.get("top_work"), "work_count": doc.get("work_count"), "birth_date": doc.get("birth_date"), "bio": "", "photo_url": ""}
                 try:
-                    resp = self.client.get(f"https://openlibrary.org/authors/{key}.json")
+                    resp = await self.client.get(f"https://openlibrary.org/authors/{key}.json")
                     if resp.status_code == 200:
                         data = resp.json()
                         bio = data.get("bio", "")
@@ -620,11 +633,11 @@ class MetadataFetcher:
             return detailed_results
         except: return []
 
-    def get_author_books(self, author_id: str, author_name: str = "", query: Optional[str] = None) -> List[Dict]:
+    async def get_author_books(self, author_id: str, author_name: str = "", query: Optional[str] = None) -> List[Dict]:
         """Return the author's English fiction bibliography.
 
         Primary source is the Google Books API — structured JSON with language,
-        categories, publish date and ISBNs, so we filter inline. For very obscure
+        categories, publish date and ISBNs, so we filter inline without scraping. For very obscure
         authors where Google Books returns nothing, fall back to OpenLibrary's
         work-level endpoint filtered on subject tags.
         """
@@ -632,12 +645,12 @@ class MetadataFetcher:
 
         if author_name:
             try:
-                books = GoogleBooksBibliography(self.client).fetch(author_name)
+                books = await GoogleBooksBibliography(self.client).fetch(author_name)
             except Exception:
                 books = []
 
         if not books:
-            raw = self._fetch_ol_works(author_id)
+            raw = await self._fetch_ol_works(author_id)
             books = [b for b in raw if self._passes_ol_filter(b)]
             for b in books:
                 b.pop("_subjects", None)
@@ -648,14 +661,14 @@ class MetadataFetcher:
 
         return sorted(books, key=lambda x: (x.get("year") or 9999, x.get("title", "")))
 
-    def _fetch_ol_works(self, author_id: str) -> List[Dict]:
+    async def _fetch_ol_works(self, author_id: str) -> List[Dict]:
         """Fetch raw works for this author from OpenLibrary, no filtering yet."""
         key = author_id.split('/')[-1]  # accept either "OL123A" or "/authors/OL123A"
         offset, limit = 0, 200
         books: List[Dict] = []
         while True:
             try:
-                resp = self.client.get(
+                resp = await self.client.get(
                     f"https://openlibrary.org/authors/{key}/works.json",
                     params={"limit": limit, "offset": offset},
                 )
@@ -668,7 +681,7 @@ class MetadataFetcher:
                 break
             for work in entries:
                 title = (work.get("title") or "").strip()
-                if not title:
+                if not title or _CRUFT_TITLE_RE.search(title) or _TRANSLITERATED_RE.search(title):
                     continue
                 books.append({
                     "title": title,

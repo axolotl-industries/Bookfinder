@@ -111,17 +111,23 @@ async def whoami(request: Request, u: str = Depends(current_user)):
 @app.get("/search")
 async def search(author: str, query: str = None, u: str = Depends(current_user)):
     fetcher = MetadataFetcher()
-    authors = fetcher.search_author(author)
-    if not authors:
-        return {"error": "Author not found"}
-    return {"authors": authors}
+    try:
+        authors = await fetcher.search_author(author)
+        if not authors:
+            return {"error": "Author not found"}
+        return {"authors": authors}
+    finally:
+        await fetcher.aclose()
 
 
 @app.get("/author_books")
 async def author_books(author_id: str, author_name: str, query: str = None, u: str = Depends(current_user)):
     fetcher = MetadataFetcher()
-    books = fetcher.get_author_books(author_id, author_name, query)
-    return {"author": author_name, "books": books}
+    try:
+        books = await fetcher.get_author_books(author_id, author_name, query)
+        return {"author": author_name, "books": books}
+    finally:
+        await fetcher.aclose()
 
 
 @app.post("/start_job")
