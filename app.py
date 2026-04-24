@@ -2,7 +2,7 @@ import asyncio, json, os, secrets, sys, uvicorn, uuid, time
 from fastapi import FastAPI, Depends, HTTPException, Body
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from core import MetadataFetcher, ScraperEngine, Downloader
+from core import MetadataFetcher, ScraperEngine, Downloader, NewznabScraper, SabnzbdClient
 
 app = FastAPI()
 security = HTTPBasic()
@@ -35,8 +35,6 @@ async def search(author: str, query: str = None, u: str = Depends(authenticate))
     fetcher = MetadataFetcher()
     authors = fetcher.search_author(author)
     if not authors: return {"error": "Author not found"}
-    # If there's an exact match with high work count, or just one result, we could auto-select,
-    # but based on user request, let's return the list for disambiguation.
     return {"authors": authors}
 
 @app.get("/author_books")
@@ -65,18 +63,42 @@ async def stop_job(job_id: str, u: str = Depends(authenticate)):
 
 async def run_background_download(job_id, data):
     def log(m): JOBS.add_log(job_id, m)
-    scraper = ScraperEngine(log, data.get('prowlarr_url'), data.get('prowlarr_key'))
-    # Use explicit absolute path for Docker volume
+    
+    usenet = NewznabScraper(data.get('usenet_url'), data.get('usenet_key'), log)
+    sab = SabnzbdClient(data.get('sab_url'), data.get('sab_key'), log)
+    scraper = ScraperEngine(log)
     downloader = Downloader("/app/downloads", log)
+    
     await scraper.start()
     try:
         for b in data['books']:
             log(f"PROCESSING: {b['title']}")
-            mirrors = await scraper.get_mirrors(data['author'], b['title'], b['isbns'])
             success = False
+            
+            # 1. Usenet
+            if data.get('usenet_url') and data.get('usenet_key'):
+                nzbs = await usenet.search(data['author'], b['title'])
+                if nzbs:
+                    nzo_id = await sab.add_url(nzbs[0]['link'], f"{data['author']} - {b['title']}")
+                    if nzo_id:
+                        log(f"Waiting for SABnzbd...")
+                        while True:
+                            status = await sab.check_status(nzo_id)
+                            if status == "completed":
+                                log(f"SUCCESS (Usenet): {b['title']}"); success = True; break
+                            if status == "failed":
+                                log(f"FAILED (Usenet): {b['title']}"); break
+                            if status == "unknown": break
+                            await asyncio.sleep(5)
+            
+            if success: continue
+
+            # 2. Mirrors
+            mirrors = await scraper.get_mirrors(data['author'], b['title'], b['isbns'])
             for name, url in mirrors:
                 if await downloader.download(name, url, data['author'], b['title'], b):
                     log(f"SUCCESS: {b['title']}"); success = True; break
+            
             if not success: log(f"FAILED: {b['title']}")
     except asyncio.CancelledError:
         log("STOPPING: Job was cancelled.")

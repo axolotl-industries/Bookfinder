@@ -43,6 +43,94 @@ async def resolve_annas_domain(log_func: Callable) -> str:
         except: continue
     return "https://annas-archive.gl"
 
+class NewznabScraper:
+    def __init__(self, api_url: str, api_key: str, log_func: Callable):
+        self.api_url = api_url.rstrip('/')
+        self.api_key = api_key
+        self.log = log_func
+
+    async def search(self, author: str, title: str) -> List[Dict]:
+        if not self.api_url or not self.api_key: return []
+        self.log(f"Searching Usenet for '{author} {title}'...")
+        # Use t=book if supported, or t=search with book categories (7000 range)
+        params = {
+            "t": "search",
+            "cat": "7000,7020",
+            "q": f"{author} {title}",
+            "apikey": self.api_key,
+            "o": "json"
+        }
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(f"{self.api_url}/api", params=params)
+                if resp.status_code != 200: return []
+                data = resp.json()
+                results = []
+                for item in data.get("item", []):
+                    res_title = item.get("title", "").lower()
+                    # Basic validation: must contain title and author
+                    if normalize_text(title) in normalize_text(res_title) and any(p.lower() in res_title for p in author.split() if len(p) > 2):
+                        results.append({
+                            "title": item.get("title"),
+                            "link": item.get("link"),
+                            "size": int(item.get("enclosure", {}).get("@attributes", {}).get("length", 0))
+                        })
+                return results
+        except Exception as e:
+            self.log(f"Usenet search error: {e}")
+            return []
+
+class SabnzbdClient:
+    def __init__(self, url: str, api_key: str, log_func: Callable):
+        self.url = url.rstrip('/')
+        self.api_key = api_key
+        self.log = log_func
+
+    async def add_url(self, nzb_url: str, title: str) -> Optional[str]:
+        if not self.url or not self.api_key: return None
+        params = {
+            "mode": "addurl",
+            "name": nzb_url,
+            "nzbname": title,
+            "cat": "books",
+            "apikey": self.api_key,
+            "output": "json"
+        }
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(f"{self.url}/api", params=params)
+                data = resp.json()
+                if data.get("status") and data.get("nzo_ids"):
+                    nzo_id = data["nzo_ids"][0]
+                    self.log(f"Sent to SABnzbd. ID: {nzo_id}")
+                    return nzo_id
+        except Exception as e:
+            self.log(f"SABnzbd error: {e}")
+        return None
+
+    async def check_status(self, nzo_id: str) -> str:
+        """Returns 'downloading', 'completed', 'failed', or 'unknown'"""
+        params = {"mode": "queue", "nzo_id": nzo_id, "apikey": self.api_key, "output": "json"}
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                # 1. Check Queue
+                resp = await client.get(f"{self.url}/api", params=params)
+                q_data = resp.json()
+                if q_data.get("queue", {}).get("slots"):
+                    return "downloading"
+                
+                # 2. Check History
+                params["mode"] = "history"
+                resp = await client.get(f"{self.url}/api", params=params)
+                h_data = resp.json()
+                slots = h_data.get("history", {}).get("slots", [])
+                if slots:
+                    status = slots[0].get("status", "").lower()
+                    if status == "completed": return "completed"
+                    if "failed" in status: return "failed"
+        except: pass
+        return "unknown"
+
 class MetadataFetcher:
     def __init__(self):
         self.client = httpx.Client(timeout=20.0, verify=False, headers={"User-Agent": UA})

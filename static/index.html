@@ -28,7 +28,7 @@
                 --text-secondary: #a1a1a6;
                 --text-tertiary: #d2d2d7;
                 --log-bg: #000000;
-                --log-text: #34c759; /* Classic green terminal feel for dark mode */
+                --log-text: #34c759;
                 --border: #3a3a3c;
                 --row-border: #2c2c2e;
                 --author-card-hover: rgba(0,113,227,0.2);
@@ -43,7 +43,6 @@
         button { padding: 14px 24px; background: var(--primary); color: white; border: none; border-radius: 10px; cursor: pointer; font-weight: 600; font-size: 16px; width: 100%; }
         button:disabled { background: #d2d2d7; cursor: not-allowed; }
         
-        /* Author Disambiguation */
         .author-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 15px; margin-top: 15px; }
         .author-card { border: 1px solid var(--border); border-radius: 10px; padding: 15px; cursor: pointer; transition: 0.2s; display: flex; flex-direction: column; gap: 10px; background: var(--card-bg); }
         .author-card:hover { border-color: var(--primary); box-shadow: 0 2px 8px var(--author-card-hover); }
@@ -63,17 +62,28 @@
         @keyframes spin { to { transform: rotate(360deg); } }
         .settings-link { text-align: right; margin-bottom: 10px; }
         .settings-link a { color: var(--primary); text-decoration: none; font-size: 14px; }
+        .config-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 10px; }
+        @media (max-width: 600px) { .config-grid { grid-template-columns: 1fr; } }
     </style>
 </head>
 <body>
     <h1>📚 Bookfinder</h1>
-    <div class="settings-link"><a href="#" onclick="toggleSettings()">⚙️ Prowlarr Settings</a></div>
+    <div class="settings-link"><a href="#" onclick="toggleSettings()">⚙️ Connection Settings</a></div>
     
     <div id="settings-card" class="card" style="display:none;">
-        <h3>Prowlarr Config</h3>
-        <input type="text" id="p_url" placeholder="URL (http://ip:9696)" style="margin-bottom:10px;">
-        <input type="password" id="p_key" placeholder="API Key" style="margin-bottom:10px;">
-        <button onclick="saveSettings()" style="background:#34c759;">Save</button>
+        <div class="config-grid">
+            <div>
+                <h4>Prowlarr (Usenet Search)</h4>
+                <input type="text" id="usenet_url" placeholder="Newznab URL (e.g. http://ip:9696/1)" style="margin-bottom:10px;">
+                <input type="password" id="usenet_key" placeholder="Prowlarr API Key" style="margin-bottom:10px;">
+            </div>
+            <div>
+                <h4>SABnzbd (Downloader)</h4>
+                <input type="text" id="sab_url" placeholder="URL (e.g. http://ip:8080)" style="margin-bottom:10px;">
+                <input type="password" id="sab_key" placeholder="SABnzbd API Key" style="margin-bottom:10px;">
+            </div>
+        </div>
+        <button onclick="saveSettings()" style="background:#34c759; margin-top:10px;">Save Configuration</button>
     </div>
 
     <div class="card">
@@ -105,11 +115,19 @@
 
     <script>
         let currentBooks = [], currentAuthor = "", logIndex = 0, currentJobId = null;
-        document.getElementById('p_url').value = localStorage.getItem('p_url') || '';
-        document.getElementById('p_key').value = localStorage.getItem('p_key') || '';
+        
+        // Load settings
+        ['usenet_url', 'usenet_key', 'sab_url', 'sab_key'].forEach(k => {
+            document.getElementById(k).value = localStorage.getItem(k) || '';
+        });
 
         function toggleSettings() { const c = document.getElementById('settings-card'); c.style.display = c.style.display==='none'?'block':'none'; }
-        function saveSettings() { localStorage.setItem('p_url', document.getElementById('p_url').value); localStorage.setItem('p_key', document.getElementById('p_key').value); toggleSettings(); }
+        function saveSettings() { 
+            ['usenet_url', 'usenet_key', 'sab_url', 'sab_key'].forEach(k => {
+                localStorage.setItem(k, document.getElementById(k).value);
+            });
+            toggleSettings(); 
+        }
 
         async function search() {
             const a = document.getElementById('author').value; if(!a) return;
@@ -180,7 +198,14 @@
             logIndex = 0;
 
             const res = await fetch('/start_job', { method: 'POST', headers: {'Content-Type':'application/json'}, 
-                body: JSON.stringify({author: currentAuthor, books: idxs.map(i => currentBooks[i]), prowlarr_url: localStorage.getItem('p_url'), prowlarr_key: localStorage.getItem('p_key')})
+                body: JSON.stringify({
+                    author: currentAuthor, 
+                    books: idxs.map(i => currentBooks[i]), 
+                    usenet_url: localStorage.getItem('usenet_url'),
+                    usenet_key: localStorage.getItem('usenet_key'),
+                    sab_url: localStorage.getItem('sab_url'),
+                    sab_key: localStorage.getItem('sab_key')
+                })
             });
             const { job_id } = await res.json();
             currentJobId = job_id;
