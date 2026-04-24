@@ -93,11 +93,18 @@ def create_robust_ssl_context():
 
 async def resolve_annas_domain(log_func: Callable) -> str:
     mirrors = ["https://annas-archive.se", "https://annas-archive.li", "https://annas-archive.gs"]
+    log_func("Resolving mirror...")
     for m in mirrors:
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                if (await client.head(m)).status_code < 400: return m
-        except: continue
+                log_func(f"Checking {m}...")
+                if (await client.head(m)).status_code < 400:
+                    log_func(f"Using mirror: {m}")
+                    return m
+        except Exception as e:
+            log_func(f"Mirror {m} failed: {e}")
+            continue
+    log_func("All mirrors failed; using fallback https://annas-archive.gl")
     return "https://annas-archive.gl"
 
 MAX_EPUB_BYTES = 50 * 1024 * 1024  # 50MB — EPUBs are small; anything bigger is a movie/audiobook/rar pack.
@@ -539,11 +546,12 @@ class GoogleBooksBibliography:
 
                 # Fiction only. Some fiction volumes lack categories entirely;
                 # accept those but reject volumes whose categories are present and
-                # don't contain "Fiction".
+                # don't contain "Fiction" or other known fiction markers.
                 categories = vol.get("categories") or []
                 if categories:
                     cat_str = " | ".join(categories).lower()
-                    if "fiction" not in cat_str:
+                    is_fiction = "fiction" in cat_str or any(f in cat_str for f in _FICTION_SUBJECTS)
+                    if not is_fiction:
                         continue
 
                 norm = normalize_text(title)
@@ -685,10 +693,11 @@ class MetadataFetcher:
     @staticmethod
     def _is_fiction_work(subjects: List[str]) -> bool:
         if not subjects:
-            return False
-        has_fiction = any(w in s for s in subjects for w in _FICTION_SUBJECTS)
-        has_non_fiction = any(w in s for s in subjects for w in _NON_FICTION_SUBJECTS)
-        return has_fiction and not has_non_fiction
+            return True
+        s_all = " | ".join(subjects).lower()
+        if any(f in s_all for f in _FICTION_SUBJECTS):
+            return True
+        return not any(n in s_all for n in _NON_FICTION_SUBJECTS)
 
     @staticmethod
     def _is_english_title(title: str) -> bool:
@@ -712,9 +721,13 @@ class ScraperEngine:
         self.client = httpx.AsyncClient(verify=False, timeout=20.0, follow_redirects=True, headers={"User-Agent": UA})
 
     async def start(self):
+        self.log("Initializing ScraperEngine...")
         self.annas_base = await resolve_annas_domain(self.log)
+        self.log("Starting Playwright...")
         self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.launch(headless=True)
+        self.log("Launching Browser...")
+        self.browser = await self.playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"])
+        self.log("ScraperEngine ready.")
 
     async def stop(self):
         try:

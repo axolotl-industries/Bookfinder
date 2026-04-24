@@ -157,12 +157,19 @@ def _library_epubs() -> set:
 async def run_background_download(job_id, data):
     def log(m): JOBS.add_log(job_id, m)
 
-    usenet = NewznabScraper(data.get('usenet_url'), data.get('usenet_key'), log)
-    sab = SabnzbdClient(data.get('sab_url'), data.get('sab_key'), log)
-    scraper = ScraperEngine(log)
-    downloader = Downloader(DOWNLOAD_DIR, log)
+    log("Starting job execution...")
+    try:
+        usenet = NewznabScraper(data.get('usenet_url'), data.get('usenet_key'), log)
+        sab = SabnzbdClient(data.get('sab_url'), data.get('sab_key'), log)
+        scraper = ScraperEngine(log)
+        downloader = Downloader(DOWNLOAD_DIR, log)
 
-    await scraper.start()
+        log("Setting up scraper engine...")
+        await scraper.start()
+    except Exception as e:
+        log(f"FAILED: Initialization error: {e}")
+        return
+
     try:
         for b in data['books']:
             log(f"PROCESSING: {b['title']}")
