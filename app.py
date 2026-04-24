@@ -163,12 +163,21 @@ def _library_epubs() -> set:
 async def run_background_download(job_id, data):
     def log(m): JOBS.add_log(job_id, m)
 
-    usenet = NewznabScraper(os.getenv('PROWLARR_URL'), os.getenv('PROWLARR_KEY'), log)
-    sab = SabnzbdClient(os.getenv('SABNZBD_URL'), os.getenv('SABNZBD_KEY'), log)
-    scraper = ScraperEngine(log)
-    downloader = Downloader(DOWNLOAD_DIR, log)
+    log("Starting background job...")
+    try:
+        log("Initializing service clients...")
+        usenet = NewznabScraper(os.getenv('PROWLARR_URL'), os.getenv('PROWLARR_KEY'), log)
+        sab = SabnzbdClient(os.getenv('SABNZBD_URL'), os.getenv('SABNZBD_KEY'), log)
+        scraper = ScraperEngine(log)
+        downloader = Downloader(DOWNLOAD_DIR, log)
 
-    await scraper.start()
+        log("Starting scraper engine (Playwright)...")
+        await scraper.start()
+        log("Scraper engine ready.")
+    except Exception as e:
+        log(f"FAILED: Initialization error: {e}")
+        return
+
     try:
         for b in data['books']:
             log(f"PROCESSING: {b['title']}")
@@ -176,34 +185,44 @@ async def run_background_download(job_id, data):
 
             # 1. Usenet — walk through candidates until one actually lands an EPUB.
             if os.getenv('PROWLARR_URL') and os.getenv('PROWLARR_KEY'):
+                log(f"Searching Usenet for '{b['title']}'...")
                 nzbs = await usenet.search(data['author'], b['title'])
+                log(f"Found {len(nzbs)} Usenet candidates.")
                 for nzb in nzbs[:MAX_USENET_TRIES]:
+                    log(f"Sending NZB to SABnzbd: {nzb['title'][:50]}...")
                     nzo_id = await sab.add_url(nzb['link'], f"{data['author']} - {b['title']}")
                     if not nzo_id:
+                        log("SABnzbd rejected the URL.")
                         continue
-                    log("Waiting for SABnzbd...")
+                    log(f"Waiting for SABnzbd (Job ID: {nzo_id})...")
                     while True:
                         status = await sab.check_status(nzo_id)
                         if status in ("completed", "failed", "unknown"):
+                            log(f"SABnzbd job finished with status: {status}")
                             break
                         await asyncio.sleep(5)
                     flatten_downloads(DOWNLOAD_DIR, log)
                     if _library_epubs() - before:
+                        log("Successfully downloaded EPUB via Usenet.")
                         break
-                    log(f"No EPUB from '{nzb['title'][:60]}'; trying next candidate")
+                    log(f"No EPUB found in download from '{nzb['title'][:60]}'; trying next candidate")
 
             # 2. Mirrors — only if Usenet didn't deliver.
             if not (_library_epubs() - before):
+                log(f"Searching mirrors for '{b['title']}'...")
                 mirrors = await scraper.get_mirrors(data['author'], b['title'], b['isbns'])
+                log(f"Found {len(mirrors)} mirror links.")
                 for name, url in mirrors:
+                    log(f"Attempting download from {name}...")
                     if await downloader.download(name, url, data['author'], b['title'], b):
+                        log(f"Successfully downloaded from {name}.")
                         break
 
             new_epubs = _library_epubs() - before
             if new_epubs:
                 log(f"SUCCESS: {b['title']} -> {', '.join(sorted(new_epubs))}")
             else:
-                log(f"FAILED: {b['title']}")
+                log(f"FAILED: Could not find '{b['title']}' on Usenet or mirrors.")
     except asyncio.CancelledError:
         log("STOPPING: Job was cancelled.")
         raise

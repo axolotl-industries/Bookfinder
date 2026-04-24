@@ -96,11 +96,18 @@ def create_robust_ssl_context():
 
 async def resolve_annas_domain(log_func: Callable) -> str:
     mirrors = ["https://annas-archive.se", "https://annas-archive.li", "https://annas-archive.gs"]
+    log_func("Resolving Anna's Archive mirror...")
     for m in mirrors:
         try:
+            log_func(f"Checking {m}...")
             async with httpx.AsyncClient(timeout=5.0) as client:
-                if (await client.head(m)).status_code < 400: return m
-        except: continue
+                if (await client.head(m)).status_code < 400:
+                    log_func(f"Using mirror: {m}")
+                    return m
+        except Exception as e:
+            log_func(f"Mirror {m} failed or timed out: {e}")
+            continue
+    log_func("All mirrors failed; using fallback https://annas-archive.gl")
     return "https://annas-archive.gl"
 
 MAX_EPUB_BYTES = 50 * 1024 * 1024  # 50MB — EPUBs are small; anything bigger is a movie/audiobook/rar pack.
@@ -134,8 +141,9 @@ class NewznabScraper:
 
     async def search(self, author: str, title: str) -> List[Dict]:
         if not self.api_url or not self.api_key:
+            self.log("Usenet search skipped: API URL or Key not configured.")
             return []
-        self.log(f"Searching Usenet for '{author} {title}'...")
+        self.log(f"Searching Usenet (Prowlarr) for '{author} {title}'...")
 
         url = f"{self.api_url}/api"
         # Newznab standard is an unquoted, space-separated query. Literal quotes around the phrase
@@ -378,7 +386,10 @@ class SabnzbdClient:
         self.log = log_func
 
     async def add_url(self, nzb_url: str, title: str) -> Optional[str]:
-        if not self.url or not self.api_key: return None
+        if not self.url or not self.api_key:
+            self.log("SABnzbd add skipped: URL or Key not configured.")
+            return None
+        self.log(f"Submitting NZB to SABnzbd: {self.url}")
         params = {
             "mode": "addurl",
             "name": nzb_url,
@@ -758,9 +769,13 @@ class ScraperEngine:
         self.client = httpx.AsyncClient(verify=False, timeout=20.0, follow_redirects=True, headers={"User-Agent": UA})
 
     async def start(self):
+        self.log("Initializing ScraperEngine...")
         self.annas_base = await resolve_annas_domain(self.log)
+        self.log("Starting Playwright (this may take a few seconds)...")
         self.playwright = await async_playwright().start()
+        self.log("Launching Chromium...")
         self.browser = await self.playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"])
+        self.log("Browser launched successfully.")
 
     async def stop(self):
         try:
