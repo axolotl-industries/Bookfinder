@@ -92,7 +92,10 @@
     <div id="results-card" class="card" style="display:none;">
         <h3 id="author-title"></h3>
         <div class="table-container"><div id="results-list"></div></div>
-        <button id="download-btn" onclick="startDownload()" style="margin-top:20px;">Download Selected</button>
+        <div style="display: flex; gap: 12px; margin-top: 20px;">
+            <button id="download-btn" onclick="startDownload()">Download Selected</button>
+            <button id="stop-btn" onclick="stopJob()" style="background: #ff453a; display: none;">Stop Process</button>
+        </div>
     </div>
 
     <div id="log-card" class="card" style="display:none;">
@@ -101,7 +104,7 @@
     </div>
 
     <script>
-        let currentBooks = [], currentAuthor = "", logIndex = 0;
+        let currentBooks = [], currentAuthor = "", logIndex = 0, currentJobId = null;
         document.getElementById('p_url').value = localStorage.getItem('p_url') || '';
         document.getElementById('p_key').value = localStorage.getItem('p_key') || '';
 
@@ -172,6 +175,7 @@
             if(!idxs.length) return alert("Select books first.");
             document.getElementById('log-card').style.display = 'block';
             document.getElementById('download-btn').disabled = true;
+            document.getElementById('stop-btn').style.display = 'block';
             document.getElementById('log').innerHTML = "Initializing job...\n";
             logIndex = 0;
 
@@ -179,7 +183,14 @@
                 body: JSON.stringify({author: currentAuthor, books: idxs.map(i => currentBooks[i]), prowlarr_url: localStorage.getItem('p_url'), prowlarr_key: localStorage.getItem('p_key')})
             });
             const { job_id } = await res.json();
+            currentJobId = job_id;
             connect(job_id);
+        }
+
+        async function stopJob() {
+            if(!currentJobId) return;
+            if(!confirm("Are you sure you want to stop the current process?")) return;
+            await fetch(`/stop_job/${currentJobId}`, { method: 'POST' });
         }
 
         function connect(job_id) {
@@ -189,11 +200,16 @@
                 const line = document.createElement('div');
                 const msg = e.data; line.textContent = msg;
                 if(msg.startsWith("SUCCESS:")) line.style.color = "#34c759";
-                if(msg.startsWith("FAILED:")) line.style.color = "#ff453a";
+                if(msg.startsWith("FAILED:") || msg === "JOB_CANCELLED_BY_USER") line.style.color = "#ff453a";
                 if(msg.startsWith("PROCESSING:")) { line.style.color = "#0a84ff"; line.style.marginTop = "10px"; line.style.fontWeight = "bold"; }
                 logDiv.appendChild(line); logDiv.scrollTop = logDiv.scrollHeight;
                 logIndex++;
-                if(msg === "JOB_COMPLETE") { ev.close(); document.getElementById('download-btn').disabled = false; }
+                if(msg === "JOB_COMPLETE") { 
+                    ev.close(); 
+                    document.getElementById('download-btn').disabled = false;
+                    document.getElementById('stop-btn').style.display = 'none';
+                    currentJobId = null;
+                }
             };
             ev.onerror = () => { ev.close(); setTimeout(() => connect(job_id), 2000); };
         }

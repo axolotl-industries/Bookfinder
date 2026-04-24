@@ -250,12 +250,15 @@ class ScraperEngine:
                     for cand in results[:3]:
                         cand_text = normalize_text(cand.get_text())
                         
-                        # For ISBN searches, we trust the result more, otherwise check title/author
+                        # Even for ISBN searches, verify title match to avoid unrelated results
+                        title_match = (len(cand_text) > 2 and norm_title in cand_text) or (len(norm_title) > 2 and norm_title in cand_text)
+                        author_match = any(p in cand_text for p in author_parts) if author_parts else True
+                        
+                        # If it's an ISBN search, we allow it if either title or author matches
+                        # If it's a title/author search, we require both.
                         if q == (isbns[0] if isbns else None):
-                            match = True
+                            match = title_match or author_match
                         else:
-                            title_match = norm_title in cand_text or cand_text in norm_title
-                            author_match = any(p in cand_text for p in author_parts) if author_parts else True
                             match = title_match and author_match
 
                         if match:

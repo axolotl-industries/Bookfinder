@@ -10,6 +10,7 @@ security = HTTPBasic()
 class JobStore:
     def __init__(self):
         self.jobs = {} 
+        self.tasks = {}
     def add_log(self, job_id, msg):
         if job_id not in self.jobs: self.jobs[job_id] = {'logs': [], 'status': 'running', 'created': time.time()}
         self.jobs[job_id]['logs'].append(msg)
@@ -48,8 +49,19 @@ async def author_books(author_id: str, author_name: str, query: str = None, u: s
 async def start_job(data: dict = Body(...), u: str = Depends(authenticate)):
     job_id = str(uuid.uuid4())
     JOBS.jobs[job_id] = {'logs': [], 'status': 'running', 'created': time.time()}
-    asyncio.create_task(run_background_download(job_id, data))
+    task = asyncio.create_task(run_background_download(job_id, data))
+    JOBS.tasks[job_id] = task
     return {"job_id": job_id}
+
+@app.post("/stop_job/{job_id}")
+async def stop_job(job_id: str, u: str = Depends(authenticate)):
+    task = JOBS.tasks.get(job_id)
+    if task:
+        task.cancel()
+        JOBS.add_log(job_id, "JOB_CANCELLED_BY_USER")
+        if job_id in JOBS.jobs: JOBS.jobs[job_id]['status'] = 'cancelled'
+        return {"status": "ok"}
+    return {"error": "Job not found"}
 
 async def run_background_download(job_id, data):
     def log(m): JOBS.add_log(job_id, m)
@@ -66,10 +78,16 @@ async def run_background_download(job_id, data):
                 if await downloader.download(name, url, data['author'], b['title'], b):
                     log(f"SUCCESS: {b['title']}"); success = True; break
             if not success: log(f"FAILED: {b['title']}")
+    except asyncio.CancelledError:
+        log("STOPPING: Job was cancelled.")
+        raise
     finally:
         await scraper.stop()
-        if job_id in JOBS.jobs: JOBS.jobs[job_id]['status'] = 'complete'
+        if job_id in JOBS.jobs: 
+            if JOBS.jobs[job_id]['status'] == 'running':
+                JOBS.jobs[job_id]['status'] = 'complete'
         log("JOB_COMPLETE")
+        if job_id in JOBS.tasks: del JOBS.tasks[job_id]
 
 @app.get("/stream/{job_id}")
 async def stream(job_id: str, last_idx: int = 0):
@@ -81,7 +99,7 @@ async def stream(job_id: str, last_idx: int = 0):
             while idx < len(job['logs']):
                 yield f"data: {job['logs'][idx]}\n\n"
                 idx += 1
-            if job['status'] == 'complete': break
+            if job['status'] in ['complete', 'cancelled']: break
             yield ": heartbeat\n\n"
             await asyncio.sleep(2)
     return StreamingResponse(generator(), media_type="text/event-stream")
