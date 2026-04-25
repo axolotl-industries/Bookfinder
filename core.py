@@ -19,6 +19,10 @@ from urllib.parse import quote, urljoin
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
+def _ascii_fold(text: str) -> str:
+    """Strip diacritical marks for indexer/library search queries (å→a, ø→o, ü→u, etc.)."""
+    return ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn')
+
 def normalize_text(text: str) -> str:
     if not text: return ""
     # NFKC folds compatibility forms and replaces e.g. NBSP with regular space.
@@ -148,7 +152,7 @@ class NewznabScraper:
         params = {
             "t": "search",
             "cat": "7020",
-            "q": f"{author} {title}",
+            "q": f"{_ascii_fold(author)} {_ascii_fold(title)}",
             "apikey": self.api_key,
         }
         headers = {
@@ -710,7 +714,7 @@ class ScraperEngine:
         norm_title, author_parts = normalize_text(title), [p for p in normalize_text(author).split() if len(p) > 2]
         queries = [isbns[0]] if isbns else []
         clean_t = re.sub(r'^the\s+|^a\s+|^an\s+', '', title.lower())
-        queries.append(f"{author} {clean_t}")
+        queries.append(f"{_ascii_fold(author)} {_ascii_fold(clean_t)}")
         try:
             for q in queries:
                 self.log(f"Checking mirrors for '{title}'...")
