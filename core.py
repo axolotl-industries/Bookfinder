@@ -561,37 +561,63 @@ class MetadataFetcher:
     async def search_author(self, name: str) -> List[Dict]:
         try:
             clean_name = name.replace(".", " ").strip().lower()
-            response = await self.client.get(f"https://openlibrary.org/search/authors.json", params={"q": clean_name})
-            docs = response.json().get("docs", [])
-            if not docs: return []
             
-            # Deduplicate by normalized name while preferring the most 'complete' records
+            # Try OpenLibrary with a strict timeout
+            docs = []
+            try:
+                resp = await self.client.get("https://openlibrary.org/search/authors.json", params={"q": clean_name}, timeout=5.0)
+                docs = resp.json().get("docs", [])
+            except: pass
+
+            if not docs:
+                # Fallback: Try Wikidata search directly if OL is slow/down
+                try:
+                    wd = WikidataBibliography(self.client)
+                    wd_id = await wd._get_author_id(name)
+                    if wd_id:
+                        # If we found a QID, we can simulate a doc for the logic below
+                        # or just return a minimal result immediately.
+                        return [{"id": wd_id, "name": name, "work_count": "?", "bio": "Authoritative record found via Wikidata.", "photo_url": ""}]
+                except: pass
+                return []
+            
+            # Deduplicate by normalized name
             seen_names = {}
             for doc in docs[:15]:
                 author_name = doc.get("name")
                 if not author_name: continue
                 norm_name = normalize_text(author_name)
-                
-                # Keep the entry with the highest work count or one that has more info
                 if norm_name not in seen_names or doc.get("work_count", 0) > seen_names[norm_name].get("work_count", 0):
                     seen_names[norm_name] = doc
 
             candidates = sorted(seen_names.values(), key=lambda x: x.get("work_count", 0), reverse=True)[:5]
-            detailed_results = []
-            for doc in candidates:
-                key = doc["key"]
-                author_data = {"id": key, "name": doc.get("name"), "top_work": doc.get("top_work"), "work_count": doc.get("work_count"), "birth_date": doc.get("birth_date"), "bio": "", "photo_url": ""}
-                try:
-                    resp = await self.client.get(f"https://openlibrary.org/authors/{key}.json")
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        bio = data.get("bio", "")
-                        author_data["bio"] = bio.get("value", bio) if isinstance(bio, dict) else bio
-                        if data.get("photos"): author_data["photo_url"] = f"https://covers.openlibrary.org/a/id/{data['photos'][0]}-M.jpg"
-                except: pass
-                detailed_results.append(author_data)
-            return detailed_results
+            
+            # Fetch details in parallel to avoid "hanging" on sequential network calls
+            tasks = [self._fetch_author_details(doc) for doc in candidates]
+            return await asyncio.gather(*tasks)
         except: return []
+
+    async def _fetch_author_details(self, doc: Dict) -> Dict:
+        key = doc["key"]
+        author_data = {
+            "id": key, 
+            "name": doc.get("name"), 
+            "top_work": doc.get("top_work"), 
+            "work_count": doc.get("work_count"), 
+            "birth_date": doc.get("birth_date"), 
+            "bio": "", 
+            "photo_url": ""
+        }
+        try:
+            resp = await self.client.get(f"https://openlibrary.org/authors/{key}.json", timeout=3.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                bio = data.get("bio", "")
+                author_data["bio"] = bio.get("value", bio) if isinstance(bio, dict) else bio
+                if data.get("photos"): 
+                    author_data["photo_url"] = f"https://covers.openlibrary.org/a/id/{data['photos'][0]}-M.jpg"
+        except: pass
+        return author_data
 
     async def get_author_books(self, author_id: str, author_name: str = "", query: Optional[str] = None) -> List[Dict]:
         """Return the author's English fiction bibliography."""
