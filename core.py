@@ -27,6 +27,9 @@ def normalize_text(text: str) -> str:
     # U+200B between words, which would otherwise fuse them into a single token.
     t = ''.join(c for c in t if unicodedata.category(c) != 'Cf')
     t = t.lower()
+    # Strip diacritics so accented names match ASCII variants in indexers (Knausgård → knausgard).
+    t = unicodedata.normalize('NFD', t)
+    t = ''.join(c for c in t if unicodedata.category(c) != 'Mn')
     # Replace dots, underscores, and common punctuation with spaces BEFORE stripping
     t = re.sub(r'[\._\-]', ' ', t)
     # Strip subtitles and parentheses
