@@ -5,7 +5,7 @@ from typing import Optional
 from fastapi import FastAPI, Request, Body, Form, Depends, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse, RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
-from core import MetadataFetcher, ScraperEngine, Downloader, NewznabScraper, SabnzbdClient, EmbyAuth, flatten_downloads
+from core import MetadataFetcher, ScraperEngine, Downloader, NewznabScraper, SabnzbdClient, EmbyAuth, GutenbergClient, flatten_downloads
 
 app = FastAPI()
 
@@ -174,6 +174,7 @@ async def run_background_download(job_id, data):
     sab = SabnzbdClient(os.getenv('SABNZBD_URL'), os.getenv('SABNZBD_KEY'), log)
     scraper = ScraperEngine(log)
     downloader = Downloader(DOWNLOAD_DIR, log)
+    gutenberg = GutenbergClient()
 
     await scraper.start()
     try:
@@ -181,25 +182,32 @@ async def run_background_download(job_id, data):
             log(f"Searching for '{b['title']}'...")
             before = _library_epubs()
 
+            # 0. Project Gutenberg — public domain books come straight from the source;
+            #    if found, skip Usenet and mirrors entirely.
+            gut_url = await gutenberg.find_epub(data['author'], b['title'], log)
+            if gut_url:
+                await downloader.download("Project Gutenberg", gut_url, data['author'], b['title'], b)
+
             # 1. Usenet — if the user pre-selected a specific NZB, use that directly
-            if os.getenv('PROWLARR_URL') and os.getenv('PROWLARR_KEY'):
-                if b.get('nzb_url'):
-                    nzbs = [{'link': b['nzb_url']}]
-                else:
-                    nzbs = await usenet.search(data['author'], b['title'])
-                for nzb in nzbs[:MAX_USENET_TRIES]:
-                    nzo_id = await sab.add_url(nzb['link'], f"{data['author']} - {b['title']}")
-                    if not nzo_id:
-                        continue
-                    while True:
-                        status = await sab.check_status(nzo_id)
-                        if status in ("completed", "failed", "unknown"):
+            if not (_library_epubs() - before):
+                if os.getenv('PROWLARR_URL') and os.getenv('PROWLARR_KEY'):
+                    if b.get('nzb_url'):
+                        nzbs = [{'link': b['nzb_url']}]
+                    else:
+                        nzbs = await usenet.search(data['author'], b['title'])
+                    for nzb in nzbs[:MAX_USENET_TRIES]:
+                        nzo_id = await sab.add_url(nzb['link'], f"{data['author']} - {b['title']}")
+                        if not nzo_id:
+                            continue
+                        while True:
+                            status = await sab.check_status(nzo_id)
+                            if status in ("completed", "failed", "unknown"):
+                                break
+                            await asyncio.sleep(5)
+                        await sab.delete_from_history(nzo_id)
+                        flatten_downloads(DOWNLOAD_DIR, lambda _: None)
+                        if _library_epubs() - before:
                             break
-                        await asyncio.sleep(5)
-                    await sab.delete_from_history(nzo_id)
-                    flatten_downloads(DOWNLOAD_DIR, lambda _: None)
-                    if _library_epubs() - before:
-                        break
 
             # 2. Mirrors
             if not (_library_epubs() - before):

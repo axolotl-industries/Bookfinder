@@ -411,6 +411,7 @@
                 if (msg.startsWith('SUCCESS:'))          { icon = '[DONE  ]'; color = '#00ff00'; weight = 'bold'; s.done++; }
                 else if (msg.startsWith('FAILED:'))      { icon = '[ERROR ]'; color = '#ff3b30'; weight = 'bold'; s.done++; }
                 else if (msg.startsWith('Searching'))    { icon = '[SEARCH]'; color = '#5ac8fa'; }
+                else if (msg.includes('Gutenberg'))      { icon = '[GUTENB]'; color = '#ffd60a'; }
                 else if (msg.includes('mirror'))         { icon = '[MIRROR]'; color = '#5856d6'; }
                 else if (msg.startsWith('STOPPING') || msg === 'JOB_CANCELLED_BY_USER') { icon = '[CANCEL]'; color = '#ff9500'; }
                 else if (msg === 'JOB_COMPLETE')         { icon = '[SYSTEM]'; color = '#8e8e93'; }

@@ -807,6 +807,46 @@ class ScraperEngine:
         finally: await page.close()
         return mirrors
 
+class GutenbergClient:
+    """Search Project Gutenberg via the Gutendex API and return a direct EPUB URL.
+
+    If a match is found, the book is public domain and Gutenberg should be used
+    exclusively — no need to touch Usenet, Libgen, or Anna's Archive.
+    """
+    _API = "https://gutendex.com/books/"
+
+    async def find_epub(self, author: str, title: str, log: Callable) -> Optional[str]:
+        query = _query_title(f"{title} {author}")
+        norm_title_full = normalize_text(title.replace(':', ' '))
+        norm_title = normalize_text(title)
+        author_parts = [p for p in normalize_text(author).split() if len(p) > 2]
+
+        def _title_match(s: str) -> bool:
+            n = normalize_text(s)
+            return norm_title_full in n or norm_title in n
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, headers={"User-Agent": UA}) as client:
+                resp = await client.get(self._API, params={"search": query})
+                if resp.status_code != 200:
+                    return None
+                for book in resp.json().get("results", []):
+                    if not _title_match(book.get("title", "")):
+                        continue
+                    raw_authors = " ".join(a.get("name", "") for a in book.get("authors", []))
+                    if author_parts and not any(p in normalize_text(raw_authors) for p in author_parts):
+                        continue
+                    epub_url = book.get("formats", {}).get("application/epub+zip")
+                    if epub_url:
+                        log(f"Found on Project Gutenberg: {book['title']}")
+                        return epub_url
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log(f"Gutenberg search error: {e}")
+        return None
+
+
 class Downloader:
     def __init__(self, base_dir: str, log_func: Callable):
         self.base_dir = os.path.abspath(base_dir)
