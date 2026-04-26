@@ -23,6 +23,17 @@ def _ascii_fold(text: str) -> str:
     """Strip diacritical marks for indexer/library search queries (å→a, ø→o, ü→u, etc.)."""
     return ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn')
 
+def _ascii_query_author(author: str) -> str:
+    """Return only the ASCII-safe words from an author name for indexer search queries.
+
+    Dropping non-ASCII words avoids mismatches caused by romanisation conventions:
+    'Knausgård' folds to 'Knausgard' (single a) but NZB titles use 'Knausgaard'
+    (the historical Norwegian double-a). 'Karl' and 'Ove' are ASCII and match fine.
+    Post-search filtering in _match catches the full author against result titles.
+    """
+    safe = ' '.join(w for w in author.split() if w.isascii())
+    return safe if safe else _ascii_fold(author)  # fall back to fold if every word has diacritics
+
 def normalize_text(text: str) -> str:
     if not text: return ""
     # NFKC folds compatibility forms and replaces e.g. NBSP with regular space.
@@ -152,7 +163,7 @@ class NewznabScraper:
         params = {
             "t": "search",
             "cat": "7020",
-            "q": f"{_ascii_fold(author)} {_ascii_fold(title)}",
+            "q": f"{_ascii_query_author(author)} {_ascii_fold(title)}".strip(),
             "apikey": self.api_key,
         }
         headers = {
@@ -473,11 +484,15 @@ class WikidataBibliography:
 
         self.log(f"Fetching bibliography for {author_name}...")
 
-        # Must be a literary work (Q7725634) or instance of book (Q571) or novel (Q8242)
+        # Q7725634 = literary work, Q8261 = novel, Q571 = book, Q47461344 = written work.
+        # Using VALUES so items classified under any of these types (or their subclasses) are
+        # included — different Wikidata editors tag novels differently, e.g. Glamorama is
+        # Q47461344 while Less Than Zero is Q7725634, so a single-type filter misses some.
         query = f"""
         SELECT DISTINCT ?itemLabel ?date WHERE {{
+          VALUES ?bookType {{ wd:Q7725634 wd:Q8261 wd:Q571 wd:Q47461344 }}
           ?item wdt:P50 wd:{author_id}.
-          ?item wdt:P31/wdt:P279* wd:Q7725634. 
+          ?item wdt:P31/wdt:P279* ?bookType.
           OPTIONAL {{ ?item wdt:P577 ?date. }}
           SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
         }}
@@ -714,7 +729,7 @@ class ScraperEngine:
         norm_title, author_parts = normalize_text(title), [p for p in normalize_text(author).split() if len(p) > 2]
         queries = [isbns[0]] if isbns else []
         clean_t = re.sub(r'^the\s+|^a\s+|^an\s+', '', title.lower())
-        queries.append(f"{_ascii_fold(author)} {_ascii_fold(clean_t)}")
+        queries.append(f"{_ascii_query_author(author)} {_ascii_fold(clean_t)}".strip())
         try:
             for q in queries:
                 self.log(f"Checking mirrors for '{title}'...")
