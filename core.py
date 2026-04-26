@@ -24,6 +24,13 @@ def _ascii_fold(text: str) -> str:
     return ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn')
 
 
+_NUM_WORDS = {
+    'zero': '0', 'one': '1', 'two': '2', 'three': '3', 'four': '4', 'five': '5',
+    'six': '6', 'seven': '7', 'eight': '8', 'nine': '9', 'ten': '10',
+    'eleven': '11', 'twelve': '12',
+}
+
+
 def normalize_text(text: str) -> str:
     if not text: return ""
     # NFKC folds compatibility forms and replaces e.g. NBSP with regular space.
@@ -47,6 +54,23 @@ def normalize_text(text: str) -> str:
     t = t.replace('&', ' and ')
     # Remove remaining non-alphanumeric (except spaces)
     t = re.sub(r'[^\w\s]', '', t)
+    # Normalise number words: "book two" → "book 2", "volume three" → "volume 3"
+    t = ' '.join(_NUM_WORDS.get(w, w) for w in t.split())
+    return " ".join(t.split())
+
+
+def _query_title(title: str) -> str:
+    """Build an indexer/mirror search query from a book title.
+
+    Preserves the subtitle (colon kept as space) and normalises number words so
+    'My Struggle: Book Two' becomes 'My Struggle Book 2' — matching NZB titles
+    like 'My.Struggle.Book.2' without collapsing into the bare 'My Struggle'
+    that would match every volume in the series.
+    """
+    t = _ascii_fold(title).lower()
+    t = re.sub(r'[\._\-:]', ' ', t)
+    t = re.sub(r'[^\w\s]', '', t)
+    t = ' '.join(_NUM_WORDS.get(w, w) for w in t.split())
     return " ".join(t.split())
 
 
@@ -153,7 +177,7 @@ class NewznabScraper:
         params = {
             "t": "search",
             "cat": "7020",
-            "q": _ascii_fold(title),
+            "q": _query_title(title),
             "apikey": self.api_key,
         }
         headers = {
@@ -279,13 +303,17 @@ class NewznabScraper:
 
     def _match(self, items: List[Dict], author: str, title: str) -> List[Dict]:
         results = []
-        norm_title = normalize_text(title)
+        # Two-pass title matching: try preserving the subtitle first (more specific), then
+        # fall back to subtitle-stripped form. This prevents "My Struggle: Book 2" from
+        # collapsing to "my struggle" and matching every volume in the series.
+        norm_title_full = normalize_text(title.replace(':', ' '))  # subtitle kept
+        norm_title = normalize_text(title)                          # subtitle stripped (fallback)
         author_parts = [p for p in normalize_text(author).split() if len(p) > 2]
         skipped = {"format": 0, "size": 0}
         for item in items:
             res_title = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', item.get("title", ""))
             norm_res_title = normalize_text(res_title)
-            title_match = norm_title in norm_res_title
+            title_match = norm_title_full in norm_res_title or norm_title in norm_res_title
             author_match = any(p in norm_res_title for p in author_parts) if author_parts else True
             if not (title_match and author_match):
                 continue
@@ -728,10 +756,16 @@ class ScraperEngine:
     async def get_mirrors(self, author: str, title: str, isbns: List[str]) -> List[Tuple[str, str]]:
         mirrors = []
         page = await self.browser.new_page()
-        norm_title, author_parts = normalize_text(title), [p for p in normalize_text(author).split() if len(p) > 2]
+        norm_title_full = normalize_text(title.replace(':', ' '))
+        norm_title = normalize_text(title)
+        author_parts = [p for p in normalize_text(author).split() if len(p) > 2]
+
+        def _title_match(s: str) -> bool:
+            n = normalize_text(s)
+            return norm_title_full in n or norm_title in n
+
         queries = [isbns[0]] if isbns else []
-        clean_t = re.sub(r'^the\s+|^a\s+|^an\s+', '', title.lower())
-        queries.append(_ascii_fold(clean_t))
+        queries.append(_query_title(title))
         try:
             for q in queries:
                 self.log(f"Checking mirrors for '{title}'...")
@@ -743,7 +777,7 @@ class ScraperEngine:
                         cols = r.find_all('td')
                         if len(cols) < 8: continue
                         raw_t, raw_a, raw_l, raw_e = cols[0].get_text(strip=True).lower(), cols[1].get_text(strip=True).lower(), cols[4].get_text(strip=True).lower(), cols[7].get_text(strip=True).lower()
-                        if 'epub' in raw_e and (any(l in raw_l for l in ['english', 'eng']) or not raw_l.strip()) and norm_title in normalize_text(raw_t) and (any(p in raw_a for p in author_parts) if author_parts else True):
+                        if 'epub' in raw_e and (any(l in raw_l for l in ['english', 'eng']) or not raw_l.strip()) and _title_match(raw_t) and (any(p in raw_a for p in author_parts) if author_parts else True):
                             ads = cols[-1].find('a', href=re.compile(r"ads\.php"))
                             if ads:
                                 direct = await self._resolve_mirror(urljoin("https://libgen.li", ads['href']), page)
@@ -757,7 +791,7 @@ class ScraperEngine:
                     results = BeautifulSoup(await page.content(), 'html.parser').select('a[href*="/md5/"]')
                     for cand in results[:3]:
                         cand_t = normalize_text(cand.get_text())
-                        if norm_title in cand_t and (any(p in cand_t for p in author_parts) if author_parts else True):
+                        if _title_match(cand.get_text()) and (any(p in cand_t for p in author_parts) if author_parts else True):
                             await page.goto(urljoin(self.annas_base, cand['href']), timeout=30000)
                             msoup = BeautifulSoup(await page.content(), 'html.parser')
                             lg = msoup.find('a', href=re.compile(r"libgen\.li/ads\.php"))

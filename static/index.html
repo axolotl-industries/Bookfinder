@@ -132,13 +132,7 @@
             cursor: pointer;
             font-weight: bold;
         }
-        .btn-stop {
-            background: none;
-            border: 1px solid #ff3b30;
-            color: #ff3b30;
-        }
-        .btn-stop:hover { background: #ff3b30; color: black; }
-        .btn-close {
+        .btn-dismiss {
             background: none;
             border: 1px solid var(--border);
             color: var(--primary);
@@ -146,7 +140,16 @@
             line-height: 1;
             padding: 3px 12px;
         }
-        .btn-close:hover { background: var(--primary); color: black; }
+        .btn-dismiss:hover { background: var(--primary); color: black; }
+        .btn-dismiss.running { border-color: #ff3b30; color: #ff3b30; }
+        .btn-dismiss.running:hover { background: #ff3b30; color: black; }
+        .btn-grab {
+            background: none;
+            border: 1px solid var(--border);
+            color: var(--primary);
+            padding: 4px 12px;
+        }
+        .btn-grab:hover { background: var(--primary); color: black; }
 
         .progress-container { font-family: inherit; color: var(--primary); margin: 10px 0 8px; font-size: 14px; font-weight: bold; }
         .progress-text { font-family: inherit; color: var(--primary); margin-bottom: 4px; font-size: 13px; }
@@ -209,16 +212,33 @@
         </div>
     </div>
 
+    <div id="candidates-card" class="card" data-label=" [ SELECT SOURCE ] " style="display:none;">
+        <h3 id="candidates-title"></h3>
+        <div class="table-container" id="candidates-table"></div>
+        <div style="margin-top: 15px;">
+            <button onclick="useMirrors()">USE MIRRORS INSTEAD</button>
+        </div>
+    </div>
+
     <div id="sessions"></div>
 
     <script>
-        let currentBooks = [], currentAuthor = "";
+        let currentBooks = [], currentAuthor = "", pendingBook = null;
         const activeSessions = {};
+        let _candidates = [];
 
         async function apiFetch(url, options) {
             const res = await fetch(url, options);
             if (res.status === 401) { window.location.href = '/login'; return new Promise(() => {}); }
             return res;
+        }
+
+        function fmtSize(n) {
+            if (!n) return '?';
+            if (n < 1024) return n + 'B';
+            if (n < 1048576) return (n / 1024).toFixed(1) + 'KB';
+            if (n < 1073741824) return (n / 1048576).toFixed(1) + 'MB';
+            return (n / 1073741824).toFixed(1) + 'GB';
         }
 
         async function search() {
@@ -228,6 +248,7 @@
 
             document.getElementById('author-select-card').style.display = 'none';
             document.getElementById('results-card').style.display = 'none';
+            document.getElementById('candidates-card').style.display = 'none';
 
             try {
                 const res = await apiFetch(`/search?author=${encodeURIComponent(a)}`);
@@ -287,8 +308,52 @@
         async function startDownload() {
             const idxs = Array.from(document.querySelectorAll('.book-chk:checked')).map(c => parseInt(c.dataset.i));
             if (!idxs.length) return alert('Select at least one book.');
-
             const books = idxs.map(i => currentBooks[i]);
+            if (books.length === 1) {
+                pendingBook = books[0];
+                await showCandidates(books[0]);
+            } else {
+                await launchJob(books);
+            }
+        }
+
+        async function showCandidates(book) {
+            const btn = document.getElementById('download-btn');
+            btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>SEARCHING USENET...';
+            document.getElementById('candidates-card').style.display = 'none';
+            try {
+                const res = await apiFetch(`/candidates?author=${encodeURIComponent(currentAuthor)}&title=${encodeURIComponent(book.title)}`);
+                const data = await res.json();
+                if (!data.candidates || !data.candidates.length) {
+                    await launchJob([book]);
+                    return;
+                }
+                _candidates = data.candidates;
+                document.getElementById('candidates-title').innerText = `SOURCES FOR: ${book.title}`;
+                let h = `<table><tr><th>NZB TITLE</th><th>SIZE</th><th></th></tr>`;
+                data.candidates.forEach((c, i) => {
+                    h += `<tr><td style="max-width:500px;word-break:break-word;text-transform:none">${c.title}</td><td style="white-space:nowrap">${fmtSize(c.size)}</td><td><button class="btn-inline btn-grab" onclick="grabNzb(${i})">GRAB</button></td></tr>`;
+                });
+                document.getElementById('candidates-table').innerHTML = h + '</table>';
+                document.getElementById('candidates-card').style.display = 'block';
+                document.getElementById('candidates-card').scrollIntoView({ behavior: 'smooth' });
+            } finally {
+                btn.disabled = false; btn.innerText = 'PULL SELECTED';
+            }
+        }
+
+        async function grabNzb(idx) {
+            const nzb = _candidates[idx];
+            document.getElementById('candidates-card').style.display = 'none';
+            await launchJob([{ ...pendingBook, nzb_url: nzb.link }]);
+        }
+
+        async function useMirrors() {
+            document.getElementById('candidates-card').style.display = 'none';
+            await launchJob([pendingBook]);
+        }
+
+        async function launchJob(books) {
             const res = await apiFetch('/start_job', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -306,10 +371,7 @@
             panel.innerHTML = `
                 <div class="session-header">
                     <span class="session-title">${author} &mdash; ${total} book${total !== 1 ? 's' : ''}</span>
-                    <div class="session-btns">
-                        <button class="btn-inline btn-stop" id="stop-${jobId}" onclick="stopSession('${jobId}')">STOP</button>
-                        <button class="btn-inline btn-close" onclick="closeSession('${jobId}')">&times;</button>
-                    </div>
+                    <button class="btn-inline btn-dismiss running" id="dismiss-${jobId}" onclick="dismissSession('${jobId}')">&times;</button>
                 </div>
                 <div class="progress-text" id="prog-text-${jobId}">JOB: 0 / ${total} RECORDS</div>
                 <div class="progress-container">
@@ -318,7 +380,7 @@
                 <div class="session-log" id="log-${jobId}"></div>
             `;
             document.getElementById('sessions').prepend(panel);
-            activeSessions[jobId] = { ev: null, done: 0, total, logIndex: 0 };
+            activeSessions[jobId] = { ev: null, done: 0, total, logIndex: 0, running: true, closeOnDone: false };
             openStream(jobId);
         }
 
@@ -366,16 +428,25 @@
 
                 if (msg === 'JOB_COMPLETE' || msg === 'JOB_CANCELLED_BY_USER') {
                     ev.close();
-                    const stopBtn = document.getElementById(`stop-${jobId}`);
-                    if (stopBtn) stopBtn.style.display = 'none';
+                    s.running = false;
+                    const btn = document.getElementById(`dismiss-${jobId}`);
+                    if (btn) btn.classList.remove('running');
+                    if (s.closeOnDone) closeSession(jobId);
                 }
             };
 
             ev.onerror = () => { ev.close(); setTimeout(() => openStream(jobId), 2000); };
         }
 
-        async function stopSession(jobId) {
-            await apiFetch(`/stop_job/${jobId}`, { method: 'POST' });
+        async function dismissSession(jobId) {
+            const s = activeSessions[jobId];
+            if (!s) return;
+            if (s.running) {
+                s.closeOnDone = true;
+                await apiFetch(`/stop_job/${jobId}`, { method: 'POST' });
+            } else {
+                closeSession(jobId);
+            }
         }
 
         function closeSession(jobId) {

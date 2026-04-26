@@ -130,6 +130,13 @@ async def author_books(author_id: str, author_name: str, query: str = None, u: s
         await fetcher.aclose()
 
 
+@app.get("/candidates")
+async def candidates(author: str, title: str, u: str = Depends(current_user)):
+    usenet = NewznabScraper(os.getenv('PROWLARR_URL'), os.getenv('PROWLARR_KEY'), lambda _: None)
+    results = await usenet.search(author, title)
+    return {"candidates": results}
+
+
 @app.post("/start_job")
 async def start_job(data: dict = Body(...), u: str = Depends(current_user)):
     job_id = str(uuid.uuid4())
@@ -174,9 +181,12 @@ async def run_background_download(job_id, data):
             log(f"Searching for '{b['title']}'...")
             before = _library_epubs()
 
-            # 1. Usenet
+            # 1. Usenet — if the user pre-selected a specific NZB, use that directly
             if os.getenv('PROWLARR_URL') and os.getenv('PROWLARR_KEY'):
-                nzbs = await usenet.search(data['author'], b['title'])
+                if b.get('nzb_url'):
+                    nzbs = [{'link': b['nzb_url']}]
+                else:
+                    nzbs = await usenet.search(data['author'], b['title'])
                 for nzb in nzbs[:MAX_USENET_TRIES]:
                     nzo_id = await sab.add_url(nzb['link'], f"{data['author']} - {b['title']}")
                     if not nzo_id:
