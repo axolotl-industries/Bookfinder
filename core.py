@@ -23,16 +23,6 @@ def _ascii_fold(text: str) -> str:
     """Strip diacritical marks for indexer/library search queries (å→a, ø→o, ü→u, etc.)."""
     return ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn')
 
-def _ascii_query_author(author: str) -> str:
-    """Return only the ASCII-safe words from an author name for indexer search queries.
-
-    Dropping non-ASCII words avoids mismatches caused by romanisation conventions:
-    'Knausgård' folds to 'Knausgard' (single a) but NZB titles use 'Knausgaard'
-    (the historical Norwegian double-a). 'Karl' and 'Ove' are ASCII and match fine.
-    Post-search filtering in _match catches the full author against result titles.
-    """
-    safe = ' '.join(w for w in author.split() if w.isascii())
-    return safe if safe else _ascii_fold(author)  # fall back to fold if every word has diacritics
 
 def normalize_text(text: str) -> str:
     if not text: return ""
@@ -163,7 +153,7 @@ class NewznabScraper:
         params = {
             "t": "search",
             "cat": "7020",
-            "q": f"{_ascii_query_author(author)} {_ascii_fold(title)}".strip(),
+            "q": _ascii_fold(title),
             "apikey": self.api_key,
         }
         headers = {
@@ -411,6 +401,18 @@ class SabnzbdClient:
         except Exception as e:
             self.log(f"SABnzbd error: {e}")
         return None
+
+    async def delete_from_history(self, nzo_id: str) -> None:
+        if not self.url or not self.api_key: return
+        try:
+            async with httpx.AsyncClient(timeout=10.0, verify=False, follow_redirects=True, headers={"User-Agent": UA}) as client:
+                await client.get(f"{self.url}/api", params={
+                    "mode": "history", "name": "delete",
+                    "del_files": 0, "value": nzo_id,
+                    "apikey": self.api_key, "output": "json",
+                })
+        except asyncio.CancelledError: raise
+        except Exception: pass
 
     async def check_status(self, nzo_id: str) -> str:
         """Returns 'downloading', 'completed', 'failed', or 'unknown'"""
@@ -729,7 +731,7 @@ class ScraperEngine:
         norm_title, author_parts = normalize_text(title), [p for p in normalize_text(author).split() if len(p) > 2]
         queries = [isbns[0]] if isbns else []
         clean_t = re.sub(r'^the\s+|^a\s+|^an\s+', '', title.lower())
-        queries.append(f"{_ascii_query_author(author)} {_ascii_fold(clean_t)}".strip())
+        queries.append(_ascii_fold(clean_t))
         try:
             for q in queries:
                 self.log(f"Checking mirrors for '{title}'...")

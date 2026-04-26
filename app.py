@@ -186,6 +186,7 @@ async def run_background_download(job_id, data):
                         if status in ("completed", "failed", "unknown"):
                             break
                         await asyncio.sleep(5)
+                    await sab.delete_from_history(nzo_id)
                     flatten_downloads(DOWNLOAD_DIR, lambda _: None)
                     if _library_epubs() - before:
                         break
