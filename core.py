@@ -507,6 +507,22 @@ class WikidataBibliography:
             self.log(f"Wikidata search error: {e}")
         return None
 
+    async def get_work_count(self, author_id: str) -> int:
+        """Get a realistic work count from Wikidata."""
+        query = f"""
+        SELECT (COUNT(DISTINCT ?item) AS ?count) WHERE {{
+          ?item wdt:P50 wd:{author_id}.
+          ?item wdt:P31/wdt:P279* ?type .
+          VALUES ?type {{ wd:Q7725634 wd:Q571 wd:Q49084 wd:Q1144673 }}
+        }}
+        """
+        try:
+            resp = await self.client.get(self.SPARQL_URL, params={"query": query}, headers={"User-Agent": self.USER_AGENT, "Accept": "application/sparql-results+json"}, timeout=10.0)
+            if resp.status_code == 200:
+                return int(resp.json()["results"]["bindings"][0]["count"]["value"])
+        except: pass
+        return 0
+
     async def fetch(self, author_name: str) -> List[Dict]:
         author_id = await self._get_author_id(author_name)
         if not author_id:
@@ -514,16 +530,12 @@ class WikidataBibliography:
 
         self.log(f"Fetching bibliography for {author_name}...")
 
-        # Q7725634 = literary work, Q8261 = novel, Q571 = book, Q47461344 = written work.
-        # Using VALUES so items classified under any of these types (or their subclasses) are
-        # included — different Wikidata editors tag novels differently, e.g. Glamorama is
-        # Q47461344 while Less Than Zero is Q7725634, so a single-type filter misses some.
+        # Broadened to include books, poems, and diaries
         query = f"""
         SELECT DISTINCT ?itemLabel ?date WHERE {{
-          VALUES ?bookType {{ wd:Q7725634 wd:Q8261 wd:Q571 wd:Q47461344 }}
           ?item wdt:P50 wd:{author_id}.
-          ?item wdt:P31/wdt:P279* ?bookType.
-          OPTIONAL {{ ?item wdt:P577 ?date. }}
+          ?item wdt:P31/wdt:P279* ?type .
+          VALUES ?type {{ wd:Q7725634 wd:Q571 wd:Q49084 wd:Q1144673 }}
           SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
         }}
         ORDER BY ?date
@@ -614,7 +626,7 @@ class MetadataFetcher:
         try:
             clean_name = name.replace(".", " ").strip().lower()
             
-            # Try OpenLibrary with a strict timeout
+            # 1. Search OpenLibrary for name resolution (fuzzy match)
             docs = []
             try:
                 resp = await self.client.get("https://openlibrary.org/search/authors.json", params={"q": clean_name}, timeout=5.0)
@@ -622,14 +634,12 @@ class MetadataFetcher:
             except: pass
 
             if not docs:
-                # Fallback: Try Wikidata search directly if OL is slow/down
+                # Direct Wikidata fallback
                 try:
                     wd = WikidataBibliography(self.client)
                     wd_id = await wd._get_author_id(name)
                     if wd_id:
-                        # If we found a QID, we can simulate a doc for the logic below
-                        # or just return a minimal result immediately.
-                        return [{"id": wd_id, "name": name, "work_count": "?", "bio": "Authoritative record found via Wikidata.", "photo_url": ""}]
+                        return [await self._enrich_wikidata_author(wd_id, name)]
                 except: pass
                 return []
             
@@ -644,10 +654,22 @@ class MetadataFetcher:
 
             candidates = sorted(seen_names.values(), key=lambda x: x.get("work_count", 0), reverse=True)[:5]
             
-            # Fetch details in parallel to avoid "hanging" on sequential network calls
+            # 2. Enrich in parallel
             tasks = [self._fetch_author_details(doc) for doc in candidates]
             return await asyncio.gather(*tasks)
         except: return []
+
+    async def _enrich_wikidata_author(self, qid: str, name: str) -> Dict:
+        """Minimal enrichment for direct Wikidata results."""
+        wd = WikidataBibliography(self.client)
+        count = await wd.get_work_count(qid)
+        return {
+            "id": qid,
+            "name": name,
+            "work_count": count,
+            "bio": "Authoritative record found via Wikidata.",
+            "photo_url": ""
+        }
 
     async def _fetch_author_details(self, doc: Dict) -> Dict:
         key = doc["key"]
@@ -664,6 +686,14 @@ class MetadataFetcher:
             resp = await self.client.get(f"https://openlibrary.org/authors/{key}.json", timeout=3.0)
             if resp.status_code == 200:
                 data = resp.json()
+                
+                # Check for Wikidata ID to get a realistic work count
+                wd_id = data.get("remote_ids", {}).get("wikidata")
+                if wd_id:
+                    wd = WikidataBibliography(self.client)
+                    author_data["work_count"] = await wd.get_work_count(wd_id)
+                    author_data["id"] = wd_id # Prefer Wikidata ID for the main record
+                
                 bio = data.get("bio", "")
                 author_data["bio"] = bio.get("value", bio) if isinstance(bio, dict) else bio
                 if data.get("photos"): 
